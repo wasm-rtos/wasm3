@@ -16,9 +16,9 @@ d_m3BeginExternC
 # define m3MemRuntime(mem)              (((M3MemoryHeader*)(mem))->runtime)
 # define m3MemInfo(mem)                 (&(((M3MemoryHeader*)(mem))->runtime->memory))
 
-# define d_m3BaseOpSig                  pc_t _pc, m3stack_t _sp, M3MemoryHeader * _mem, m3reg_t _r0
+# define d_m3BaseOpSig                  IM3Runtime _runtime, pc_t _pc, m3stack_t _sp, M3MemoryHeader * _mem, m3reg_t _r0
 # define d_m3BaseOpArgs                 _sp, _mem, _r0
-# define d_m3BaseOpAllArgs              _pc, _sp, _mem, _r0
+# define d_m3BaseOpAllArgs              _runtime, _pc, _sp, _mem, _r0
 # define d_m3BaseOpDefaultArgs          0
 # define d_m3BaseClearRegisters         _r0 = 0;
 # define d_m3BaseCstr                   ""
@@ -49,18 +49,29 @@ d_m3BeginExternC
     typedef m3ret_t (vectorcall * IM3Operation) (d_m3OpSig, cstr_t i_operationName);
 #    define d_m3Op(NAME)                M3_NO_UBSAN d_m3RetSig op_##NAME (d_m3OpSig, cstr_t i_operationName)
 
-#    define nextOpImpl()            ((IM3Operation)(* _pc))(_pc + 1, d_m3OpArgs, __FUNCTION__)
-#    define jumpOpImpl(PC)          ((IM3Operation)(*  PC))( PC + 1, d_m3OpArgs, __FUNCTION__)
+#    define nextOpImpl()            ((IM3Operation)(* _pc))(_runtime, _pc + 1, d_m3OpArgs, __FUNCTION__)
+#    define jumpOpImpl(PC)          ((IM3Operation)(*  PC))(_runtime, PC + 1, d_m3OpArgs, __FUNCTION__)
 # else
     typedef m3ret_t (vectorcall * IM3Operation) (d_m3OpSig);
 #    define d_m3Op(NAME)                M3_NO_UBSAN d_m3RetSig op_##NAME (d_m3OpSig)
 
-#    define nextOpImpl()            ((IM3Operation)(* _pc))(_pc + 1, d_m3OpArgs)
-#    define jumpOpImpl(PC)          ((IM3Operation)(*  PC))( PC + 1, d_m3OpArgs)
+#    define nextOpImpl()            ((IM3Operation)(* _pc))(_runtime, _pc + 1, d_m3OpArgs)
+#    define jumpOpImpl(PC)          ((IM3Operation)(*  PC))(_runtime, PC + 1, d_m3OpArgs)
 # endif
 
-#define nextOpDirect()              M3_MUSTTAIL return nextOpImpl()
-#define jumpOpDirect(PC)            M3_MUSTTAIL return jumpOpImpl((pc_t)(PC))
+m3ret_t  FuelCheckAndSave  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
+# if d_m3HasFloat
+    , f64 fp0
+# endif
+);
+
+# if d_m3HasFloat
+#   define FuelCheck(PC)            FuelCheckAndSave (_runtime, (pc_t)(PC), _sp, _mem, _r0, _fp0)
+# else
+#   define FuelCheck(PC)            FuelCheckAndSave (_runtime, (pc_t)(PC), _sp, _mem, _r0)
+# endif
+#define nextOpDirect()              do { m3ret_t _fuelTrap = FuelCheck (_pc); if (M3_UNLIKELY(_fuelTrap)) return _fuelTrap; M3_MUSTTAIL return nextOpImpl(); } while (0)
+#define jumpOpDirect(PC)            do { pc_t _jumpPC = (pc_t)(PC); m3ret_t _fuelTrap = FuelCheck (_jumpPC); if (M3_UNLIKELY(_fuelTrap)) return _fuelTrap; M3_MUSTTAIL return jumpOpImpl(_jumpPC); } while (0)
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
 d_m3RetSig  RunCode  (d_m3OpSig, cstr_t i_operationName)

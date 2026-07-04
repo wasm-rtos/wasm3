@@ -158,6 +158,20 @@ void                        Environment_AddFuncType     (IM3Environment i_enviro
 
 //---------------------------------------------------------------------------------------------------------------------------------
 
+
+typedef struct M3ContinuationFrame
+{
+    pc_t                    pc;
+    m3stack_t               sp;
+    M3MemoryHeader *        mem;
+    m3reg_t                 r0;
+    bool                    allowInternalControlFlow;
+# if d_m3HasFloat
+    f64                     fp0;
+# endif
+}
+M3ContinuationFrame;
+
 typedef struct M3Runtime
 {
     M3Compilation           compilation;
@@ -177,6 +191,14 @@ typedef struct M3Runtime
     u32                     stackSize;
     u32                     numStackSlots;
     IM3Function             lastCalled;     // last function that successfully executed
+
+    u64                     fuel;
+    bool                    fuelEnabled;
+    bool                    suspended;
+    IM3Function             suspendedFunction;
+    M3ContinuationFrame *   continuationFrames; // ordered outer-to-inner; resume executes from the end
+    u32                     numContinuationFrames;
+    u32                     maxContinuationFrames;
 
     void *                  userdata;
 

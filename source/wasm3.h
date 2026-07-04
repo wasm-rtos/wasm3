@@ -138,6 +138,11 @@ d_m3ErrorConst  (none,                          NULL)
 
 // general errors
 d_m3ErrorConst  (mallocFailed,                  "memory allocation failed")
+d_m3ErrorConst  (fuelExhausted,                 "fuel exhausted")
+d_m3ErrorConst  (runtimeSuspended,              "runtime is suspended")
+d_m3ErrorConst  (snapshotInvalid,              "runtime snapshot is invalid")
+d_m3ErrorConst  (snapshotUnsupported,          "runtime snapshot operation is unsupported")
+d_m3ErrorConst  (snapshotBufferTooSmall,       "runtime snapshot buffer is too small")
 
 // parse errors
 d_m3ErrorConst  (incompatibleWasmVersion,       "incompatible Wasm binary version")
@@ -234,6 +239,18 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
 
     void *              m3_GetUserData              (IM3Runtime             i_runtime);
 
+    M3Result            m3_GetRuntimeSnapshotSize (IM3Runtime             runtime,
+                                                     uint32_t *            out_size);
+
+    M3Result            m3_SaveRuntimeSnapshot    (IM3Runtime             runtime,
+                                                     uint8_t *             buffer,
+                                                     uint32_t              buffer_size,
+                                                     uint32_t *            out_size);
+
+    M3Result            m3_LoadRuntimeSnapshot    (IM3Runtime             runtime,
+                                                     const uint8_t *       buffer,
+                                                     uint32_t              buffer_size);
+
 
 //-------------------------------------------------------------------------------------------------------------------------------
 //  modules
@@ -312,6 +329,14 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     uint32_t            m3_GetRetCount              (IM3Function i_function);
     M3ValueType         m3_GetArgType               (IM3Function i_function, uint32_t i_index);
     M3ValueType         m3_GetRetType               (IM3Function i_function, uint32_t i_index);
+
+    void                m3_SetFuel                (IM3Runtime runtime, uint64_t fuel);
+    void                m3_AddFuel                (IM3Runtime runtime, uint64_t fuel);
+    void                m3_DisableFuel            (IM3Runtime runtime);
+    uint64_t            m3_GetFuel                (IM3Runtime runtime);
+    uint32_t            m3_IsFuelEnabled          (IM3Runtime runtime);
+    uint32_t            m3_IsSuspended            (IM3Runtime runtime);
+    M3Result            m3_Resume                 (IM3Runtime runtime);
 
     M3Result            m3_CallV                    (IM3Function i_function, ...);
     M3Result            m3_CallVL                   (IM3Function i_function, va_list i_args);

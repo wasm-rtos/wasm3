@@ -36,6 +36,94 @@
 
 d_m3BeginExternC
 
+m3ret_t  FuelInsertFrameEx  (IM3Runtime runtime, u32 index, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0, bool allowInternalControlFlow
+# if d_m3HasFloat
+    , f64 fp0
+# endif
+)
+{
+    d_m3Assert (runtime);
+    if (index > runtime->numContinuationFrames)
+        index = runtime->numContinuationFrames;
+
+    if (runtime->numContinuationFrames == runtime->maxContinuationFrames)
+    {
+        u32 oldMax = runtime->maxContinuationFrames;
+        if (oldMax > (UINT32_MAX / 2))
+            return m3Err_mallocFailed;
+        u32 newMax = oldMax ? oldMax * 2 : 8;
+        M3ContinuationFrame * frames = m3_ReallocArray (M3ContinuationFrame, runtime->continuationFrames, newMax, oldMax);
+        if (M3_UNLIKELY(not frames))
+            return m3Err_mallocFailed;
+        runtime->continuationFrames = frames;
+        runtime->maxContinuationFrames = newMax;
+    }
+
+    if (index < runtime->numContinuationFrames)
+    {
+        memmove (& runtime->continuationFrames [index + 1],
+                 & runtime->continuationFrames [index],
+                 sizeof (M3ContinuationFrame) * (runtime->numContinuationFrames - index));
+    }
+
+    M3ContinuationFrame * frame = & runtime->continuationFrames [index];
+    frame->pc = pc;
+    frame->sp = sp;
+    frame->mem = mem;
+    frame->r0 = r0;
+    frame->allowInternalControlFlow = allowInternalControlFlow;
+# if d_m3HasFloat
+    frame->fp0 = fp0;
+# endif
+    runtime->numContinuationFrames++;
+    runtime->suspended = true;
+    return m3Err_fuelExhausted;
+}
+
+m3ret_t  FuelInsertFrame  (IM3Runtime runtime, u32 index, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
+# if d_m3HasFloat
+    , f64 fp0
+# endif
+)
+{
+    return FuelInsertFrameEx (runtime, index, pc, sp, mem, r0, false
+# if d_m3HasFloat
+        , fp0
+# endif
+    );
+}
+
+m3ret_t  FuelPushFrame  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
+# if d_m3HasFloat
+    , f64 fp0
+# endif
+)
+{
+    return FuelInsertFrame (runtime, runtime->numContinuationFrames, pc, sp, mem, r0
+# if d_m3HasFloat
+        , fp0
+# endif
+    );
+}
+
+m3ret_t  FuelCheckAndSave  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
+# if d_m3HasFloat
+    , f64 fp0
+# endif
+)
+{
+    if (M3_LIKELY(not runtime or not runtime->fuelEnabled))
+        return m3Err_none;
+    if (M3_UNLIKELY(runtime->fuel == 0))
+        return FuelPushFrame (runtime, pc, sp, mem, r0
+# if d_m3HasFloat
+            , fp0
+# endif
+        );
+    runtime->fuel--;
+    return m3Err_none;
+}
+
 # define rewrite_op(OP)             * ((void **) (_pc-1)) = (void*)(OP)
 
 # define immediate(TYPE)            * ((TYPE *) _pc++)
@@ -546,11 +634,12 @@ d_m3Op  (Call)
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
+    u32 frameDepth = _runtime->numContinuationFrames;
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-    m3ret_t r = Call (callPC, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
+    m3ret_t r = Call (_runtime, callPC, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-    m3ret_t r = Call (callPC, sp, _mem, d_m3OpDefaultArgs);
+    m3ret_t r = Call (_runtime, callPC, sp, _mem, d_m3OpDefaultArgs);
 # endif
 
     _mem = memory->mallocated;
@@ -559,7 +648,18 @@ d_m3Op  (Call)
         nextOp ();
     else
     {
-        pushBacktraceFrame ();
+        if (r == m3Err_fuelExhausted)
+        {
+            m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc, _sp, _mem, _r0
+# if d_m3HasFloat
+                , _fp0
+# endif
+            );
+            if (parentResult != m3Err_fuelExhausted)
+                forwardTrap (parentResult);
+        }
+        else
+            pushBacktraceFrame ();
         forwardTrap (r);
     }
 }
@@ -574,6 +674,7 @@ d_m3Op  (CallIndirect)
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
+    u32 frameDepth = _runtime->numContinuationFrames;
 
     m3ret_t r = m3Err_none;
 
@@ -592,9 +693,9 @@ d_m3Op  (CallIndirect)
                 {
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-                    r = Call (function->compiled, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
+                    r = Call (_runtime, function->compiled, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-                    r = Call (function->compiled, sp, _mem, d_m3OpDefaultArgs);
+                    r = Call (_runtime, function->compiled, sp, _mem, d_m3OpDefaultArgs);
 # endif
 
                     _mem = memory->mallocated;
@@ -603,7 +704,18 @@ d_m3Op  (CallIndirect)
                         nextOpDirect ();
                     else
                     {
-                        pushBacktraceFrame ();
+                        if (r == m3Err_fuelExhausted)
+                        {
+                            m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc, _sp, _mem, _r0
+# if d_m3HasFloat
+                                , _fp0
+# endif
+                            );
+                            if (parentResult != m3Err_fuelExhausted)
+                                forwardTrap (parentResult);
+                        }
+                        else
+                            pushBacktraceFrame ();
                         forwardTrap (r);
                     }
                 }
@@ -870,6 +982,7 @@ d_m3Op  (Loop)
     d_m3ClearRegisters
 
     m3ret_t r;
+    u32 frameDepth = _runtime->numContinuationFrames;
 
     IM3Memory memory = m3MemInfo (_mem);
 
@@ -888,6 +1001,17 @@ d_m3Op  (Loop)
         // linear memory pointer needs refreshed here because the block it's looping over
         // can potentially invoke the grow operation.
         _mem = memory->mallocated;
+        if (r == m3Err_fuelExhausted)
+        {
+            m3ret_t loopResult = FuelInsertFrameEx (_runtime, frameDepth, _pc - 1, _sp, _mem, _r0, true
+# if d_m3HasFloat
+                , _fp0
+# endif
+            );
+            if (loopResult != m3Err_fuelExhausted)
+                forwardTrap (loopResult);
+            forwardTrap (r);
+        }
     }
     while (r == _pc);
 

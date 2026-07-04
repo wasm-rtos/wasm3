@@ -53,3 +53,4 @@ elseif(BUILD_WASI MATCHES "uvwasi")
     target_compile_definitions(m3 PUBLIC d_m3HasUVWASI)
     include_directories("${libuv_SOURCE_DIR}/include")
 endif()
+
