@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) !void {
             "source/m3_code.c",
             "source/m3_compile.c",
             "source/m3_core.c",
+            "source/m3_direct.c",
             "source/m3_env.c",
             "source/m3_exec.c",
             "source/m3_function.c",

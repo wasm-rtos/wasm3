@@ -83,7 +83,9 @@ void FreeImportInfo (M3ImportInfo * i_info)
 
 void  Function_Release  (IM3Function i_function)
 {
+#if !d_m3UseDirectExecutor
     m3_Free (i_function->constants);
+#endif
 
     for (int i = 0; i < i_function->numNames; i++)
     {
@@ -230,4 +232,3 @@ u32  GetFunctionNumArgsAndLocals (IM3Function i_function)
     else
         return 0;
 }
-

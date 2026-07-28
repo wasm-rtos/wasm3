@@ -49,6 +49,8 @@ jobs:
     - name: Build
       run: |
         cmake --build build
+    - name: Test direct execution API
+      run: sh test/direct/run.sh
     - name: Test WebAssembly spec
       run: cd test && python3 run-spec-test.py
     - name: Test previous WebAssembly specs

@@ -87,19 +87,16 @@ void ExceptionBreakpoint (cstr_t i_exception, cstr_t i_message)
 }
 
 
-typedef struct OpInfo
-{
-    IM3OpInfo   info;
-    m3opcode_t  opcode;
-}
-OpInfo;
-
 void  m3_PrintM3Info  ()
 {
     printf ("\n-- m3 configuration --------------------------------------------\n");
 //  printf (" sizeof M3CodePage    : %zu bytes  (%d slots) \n", sizeof (M3CodePage), c_m3CodePageNumSlots);
     printf (" sizeof M3MemPage     : %u bytes              \n", d_m3DefaultMemPageSize);
+#if d_m3UseDirectExecutor
+    printf (" executor              : direct Wasm bytecode\n");
+#else
     printf (" sizeof M3Compilation : %zu bytes             \n", sizeof (M3Compilation));
+#endif
     printf (" sizeof M3Function    : %zu bytes             \n", sizeof (M3Function));
     printf ("----------------------------------------------------------------\n\n");
 }
@@ -172,6 +169,15 @@ cstr_t  SPrintValue  (void * i_value, u8 i_type)
     SPrintArg (string, 100, (m3stack_t) i_value, i_type);
     return string;
 }
+
+#if !d_m3UseDirectExecutor
+
+typedef struct OpInfo
+{
+    IM3OpInfo   info;
+    m3opcode_t  opcode;
+}
+OpInfo;
 
 static
 OpInfo find_operation_info  (IM3Operation i_operation)
@@ -494,6 +500,8 @@ void  log_emit  (IM3Compilation o, IM3Operation i_operation)
     else printf ("not found: %p\n", i_operation);
 }
 
+#endif // !d_m3UseDirectExecutor
+
 #endif // DEBUG
 
 
@@ -561,4 +569,3 @@ void  m3_PrintProfilerInfo  ()
 void  m3_PrintProfilerInfo  () {}
 
 # endif
-

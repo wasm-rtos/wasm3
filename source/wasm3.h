@@ -338,6 +338,23 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     uint32_t            m3_IsSuspended            (IM3Runtime runtime);
     M3Result            m3_Resume                 (IM3Runtime runtime);
 
+    // Begin a call without executing its first instruction.
+    M3Result            m3_Start                  (IM3Function function,
+                                                   uint32_t argc,
+                                                   const void * argptrs[]);
+
+    // Execute exactly one Core WebAssembly instruction.
+    M3Result            m3_Step                   (IM3Runtime runtime);
+
+    // Execute at most `fuel` Core WebAssembly instructions. A 0xFC-prefixed
+    // instruction is still one instruction and therefore costs one fuel.
+    M3Result            m3_Execute                (IM3Runtime runtime,
+                                                   uint64_t fuel,
+                                                   uint64_t * consumed);
+
+    // Execute without a fuel limit. This can intentionally run forever.
+    M3Result            m3_Run                    (IM3Runtime runtime);
+
     M3Result            m3_CallV                    (IM3Function i_function, ...);
     M3Result            m3_CallVL                   (IM3Function i_function, va_list i_args);
     M3Result            m3_Call                     (IM3Function i_function, uint32_t i_argc, const void * i_argptrs[]);

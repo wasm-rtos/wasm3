@@ -124,7 +124,7 @@ M3Result  FindAndLinkFunction      (IM3Module       io_module,
                                     ccstr_t         i_moduleName,
                                     ccstr_t         i_functionName,
                                     ccstr_t         i_signature,
-                                    voidptr_t       i_function,
+                                    M3RawCall       i_function,
                                     voidptr_t       i_userdata)
 {
 _try {
@@ -146,7 +146,14 @@ _try {
                 if (i_signature) {
 _                   (ValidateSignature (f, i_signature));
                 }
-_               (CompileRawFunction (io_module, f, i_function, i_userdata));
+#if d_m3UseDirectExecutor
+                f->rawFunction = i_function;
+                f->rawUserdata = i_userdata;
+                f->module = io_module;
+                result = m3Err_none;
+#else
+_               (CompileRawFunction (io_module, f, (const void *)i_function, i_userdata));
+#endif
             }
         }
     }
@@ -161,7 +168,7 @@ M3Result  m3_LinkRawFunctionEx  (IM3Module            io_module,
                                 M3RawCall             i_function,
                                 const void *          i_userdata)
 {
-    return FindAndLinkFunction (io_module, i_moduleName, i_functionName, i_signature, (voidptr_t)i_function, i_userdata);
+    return FindAndLinkFunction (io_module, i_moduleName, i_functionName, i_signature, i_function, i_userdata);
 }
 
 M3Result  m3_LinkRawFunction  (IM3Module            io_module,
@@ -170,6 +177,5 @@ M3Result  m3_LinkRawFunction  (IM3Module            io_module,
                               const char * const    i_signature,
                               M3RawCall             i_function)
 {
-    return FindAndLinkFunction (io_module, i_moduleName, i_functionName, i_signature, (voidptr_t)i_function, NULL);
+    return FindAndLinkFunction (io_module, i_moduleName, i_functionName, i_signature, i_function, NULL);
 }
-

@@ -10,6 +10,7 @@
 
 #include "m3_env.h"
 #include "m3_compile.h"
+#include "m3_direct.h"
 #include "m3_exception.h"
 #include "m3_info.h"
 
@@ -62,8 +63,10 @@ void  Environment_Release  (IM3Environment i_environment)
         ftype = next;
     }
 
+#if !d_m3UseDirectExecutor
     m3log (runtime, "freeing %d pages from environment", CountCodePages (i_environment->pagesReleased));
     FreeCodePages (& i_environment->pagesReleased);
+#endif
 }
 
 
@@ -110,6 +113,8 @@ void  Environment_AddFuncType  (IM3Environment i_environment, IM3FuncType * io_f
     * io_funcType = newType;
 }
 
+
+#if !d_m3UseDirectExecutor
 
 IM3CodePage RemoveCodePageOfCapacity (M3CodePage ** io_list, u32 i_minimumLineCount)
 {
@@ -168,6 +173,8 @@ void  Environment_ReleaseCodePages  (IM3Environment i_environment, IM3CodePage i
         i_environment->pagesReleased = i_codePageList;
     }
 }
+
+#endif // !d_m3UseDirectExecutor
 
 
 IM3Runtime  m3_NewRuntime  (IM3Environment i_environment, u32 i_stackSizeInBytes, void * i_userdata)
@@ -230,14 +237,18 @@ void *  _FreeModule  (IM3Module i_module, void * i_info)
 
 void  Runtime_Release  (IM3Runtime i_runtime)
 {
-    ForEachModule (i_runtime, _FreeModule, NULL);                   d_m3Assert (i_runtime->numActiveCodePages == 0);
-
+    ForEachModule (i_runtime, _FreeModule, NULL);
+#if d_m3UseDirectExecutor
+    DirectRelease (i_runtime);
+#else
+    d_m3Assert (i_runtime->numActiveCodePages == 0);
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesOpen);
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesFull);
+    m3_Free (i_runtime->continuationFrames);
+#endif
 
     m3_Free (i_runtime->originStack);
     m3_Free (i_runtime->memory.mallocated);
-    m3_Free (i_runtime->continuationFrames);
 }
 
 
@@ -254,6 +265,9 @@ void  m3_FreeRuntime  (IM3Runtime i_runtime)
 
 M3Result  EvaluateExpression  (IM3Module i_module, void * o_expressed, u8 i_type, bytes_t * io_bytes, cbytes_t i_end)
 {
+#if d_m3UseDirectExecutor
+    return DirectEvaluateExpression (i_module, o_expressed, i_type, io_bytes, i_end);
+#else
     M3Result result = m3Err_none;
 
     // OPTZ: use a simplified interpreter for expressions
@@ -331,6 +345,7 @@ M3Result  EvaluateExpression  (IM3Module i_module, void * o_expressed, u8 i_type
     * io_bytes = o->wasm;
 
     return result;
+#endif
 }
 
 
@@ -534,6 +549,11 @@ _               (ReadLEB_u32 (& functionIndex, & bytes, end));
 
 M3Result  m3_CompileModule  (IM3Module io_module)
 {
+#if d_m3UseDirectExecutor
+    // Direct execution keeps bytecode in its original form. Function bodies
+    // are validated without producing code pages.
+    return DirectValidateModule (io_module);
+#else
     M3Result result = m3Err_none;
 
     for (u32 i = 0; i < io_module->numFunctions; ++i)
@@ -546,6 +566,7 @@ _           (CompileFunction (f));
     }
 
     _catch: return result;
+#endif
 }
 
 M3Result  m3_RunStart  (IM3Module io_module)
@@ -555,6 +576,30 @@ M3Result  m3_RunStart  (IM3Module io_module)
     return m3Err_none;
 #endif
 
+#if d_m3UseDirectExecutor
+    if (not io_module)
+        return m3Err_moduleNotLinked;
+    if (io_module->startFunction < 0)
+        return m3Err_none;
+
+    IM3Function function = &io_module->functions[io_module->startFunction];
+    IM3FuncType ftype = function->funcType;
+    if (ftype->numArgs != 0 || ftype->numRets != 0)
+        return m3Err_argumentCountMismatch;
+
+    i32 savedStart = io_module->startFunction;
+    io_module->startFunction = -1;
+    M3Result result = DirectStart (function);
+    if (result)
+    {
+        io_module->startFunction = savedStart;
+        return result;
+    }
+
+    return io_module->runtime->fuelEnabled
+         ? DirectExecute (io_module->runtime, io_module->runtime->fuel, NULL)
+         : DirectRun (io_module->runtime);
+#else
     M3Result result = m3Err_none;
     i32 startFunctionTmp = -1;
 
@@ -592,6 +637,7 @@ _           (CompileFunction (function));
     }
 
     _catch: return result;
+#endif
 }
 
 // TODO: deal with main + side-modules loading efforcement
@@ -747,10 +793,15 @@ M3Result  m3_FindFunction  (IM3Function * o_function, IM3Runtime i_runtime, cons
 
     if (function)
     {
+#if d_m3UseDirectExecutor
+_       (DirectValidateModule (function->module))
+_       (DirectValidateFunctionGraph (function))
+#else
         if (not function->compiled)
         {
 _           (CompileFunction (function))
         }
+#endif
     }
     else _throw (ErrorModule (m3Err_functionLookupFailed, i_runtime->modules, "'%s'", i_functionName));
 
@@ -776,10 +827,12 @@ _try {
 
     if (function)
     {
+#if !d_m3UseDirectExecutor
         if (not function->compiled)
         {
 _           (CompileFunction (function))
         }
+#endif
     }
 
     * o_function = function;
@@ -788,6 +841,7 @@ _           (CompileFunction (function))
 }
 
 
+#if !d_m3UseDirectExecutor
 static
 M3Result checkStartFunction(IM3Module i_module)
 {
@@ -801,6 +855,7 @@ M3Result checkStartFunction(IM3Module i_module)
 
     return result;
 }
+#endif
 
 uint32_t  m3_GetArgCount  (IM3Function i_function)
 {
@@ -882,6 +937,7 @@ void  m3_DisableFuel  (IM3Runtime runtime)
     if (runtime) runtime->fuelEnabled = false;
 }
 
+#if !d_m3UseDirectExecutor
 static void  ClearSuspendedRuntime  (IM3Runtime runtime)
 {
     if (runtime)
@@ -891,13 +947,88 @@ static void  ClearSuspendedRuntime  (IM3Runtime runtime)
         runtime->suspendedFunction = NULL;
     }
 }
+#endif
 
 uint64_t  m3_GetFuel  (IM3Runtime runtime) { return runtime ? runtime->fuel : 0; }
 uint32_t  m3_IsFuelEnabled  (IM3Runtime runtime) { return runtime ? runtime->fuelEnabled : 0; }
 uint32_t  m3_IsSuspended  (IM3Runtime runtime) { return runtime ? runtime->suspended : 0; }
 
+M3Result  m3_Start  (IM3Function function, uint32_t argc, const void * argptrs[])
+{
+#if d_m3UseDirectExecutor
+    if (not function || not function->module)
+        return m3Err_moduleNotLinked;
+    IM3Runtime runtime = function->module->runtime;
+    if (not runtime)
+        return m3Err_moduleNotLinked;
+    if (runtime->directActive || runtime->suspended)
+        return m3Err_runtimeSuspended;
+    if (argc != function->funcType->numArgs)
+        return m3Err_argumentCountMismatch;
+
+    u8 * stack = GetStackPointerForArgs (function);
+    for (u32 i = 0; i < argc; ++i)
+    {
+        if (not argptrs || not argptrs[i])
+            return m3Err_argumentCountMismatch;
+        switch (d_FuncArgType (function->funcType, i))
+        {
+        case c_m3Type_i32: *(i32 *)stack = *(const i32 *)argptrs[i]; stack += 8; break;
+        case c_m3Type_i64: *(i64 *)stack = *(const i64 *)argptrs[i]; stack += 8; break;
+# if d_m3HasFloat
+        case c_m3Type_f32: *(f32 *)stack = *(const f32 *)argptrs[i]; stack += 8; break;
+        case c_m3Type_f64: *(f64 *)stack = *(const f64 *)argptrs[i]; stack += 8; break;
+# endif
+        default: return m3Err_argumentTypeMismatch;
+        }
+    }
+    return DirectStart (function);
+#else
+    (void) function; (void) argc; (void) argptrs;
+    return m3Err_noCompiler;
+#endif
+}
+
+M3Result  m3_Step  (IM3Runtime runtime)
+{
+#if d_m3UseDirectExecutor
+    return DirectStep (runtime);
+#else
+    (void) runtime;
+    return m3Err_noCompiler;
+#endif
+}
+
+M3Result  m3_Execute  (IM3Runtime runtime, uint64_t fuel, uint64_t * consumed)
+{
+#if d_m3UseDirectExecutor
+    return DirectExecute (runtime, fuel, consumed);
+#else
+    (void) runtime; (void) fuel;
+    if (consumed) *consumed = 0;
+    return m3Err_noCompiler;
+#endif
+}
+
+M3Result  m3_Run  (IM3Runtime runtime)
+{
+#if d_m3UseDirectExecutor
+    return DirectRun (runtime);
+#else
+    (void) runtime;
+    return m3Err_noCompiler;
+#endif
+}
+
 M3Result  m3_Resume  (IM3Runtime runtime)
 {
+#if d_m3UseDirectExecutor
+    if (not runtime || not runtime->suspended || not runtime->directActive)
+        return m3Err_runtimeSuspended;
+    runtime->suspended = false;
+    return runtime->fuelEnabled ? DirectExecute (runtime, runtime->fuel, NULL)
+                                : DirectRun (runtime);
+#else
     if (not runtime or not runtime->suspended or runtime->numContinuationFrames == 0)
         return m3Err_runtimeSuspended;
 
@@ -940,6 +1071,7 @@ M3Result  m3_Resume  (IM3Runtime runtime)
     ClearSuspendedRuntime (runtime);
     runtime->lastCalled = function;
     return m3Err_none;
+#endif
 }
 
 M3Result  m3_CallV  (IM3Function i_function, ...)
@@ -971,9 +1103,11 @@ M3Result  m3_CallVL  (IM3Function i_function, va_list i_args)
 
     if (runtime->suspended) return m3Err_runtimeSuspended;
 
+#if !d_m3UseDirectExecutor
     if (!i_function->compiled) {
         return m3Err_missingCompiledCode;
     }
+#endif
 
 # if d_m3RecordBacktraces
     ClearBacktrace (runtime);
@@ -981,7 +1115,9 @@ M3Result  m3_CallVL  (IM3Function i_function, va_list i_args)
 
     m3StackCheckInit();
 
+#if !d_m3UseDirectExecutor
 _   (checkStartFunction(i_function->module))
+#endif
 
     s = GetStackPointerForArgs (i_function);
 
@@ -998,7 +1134,12 @@ _   (checkStartFunction(i_function->module))
         }
     }
 
-# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+#if d_m3UseDirectExecutor
+    result = DirectStart (i_function);
+    if (not result)
+        result = runtime->fuelEnabled ? DirectExecute (runtime, runtime->fuel, NULL)
+                                      : DirectRun (runtime);
+#elif (d_m3EnableOpProfiling || d_m3EnableOpTracing)
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
@@ -1024,9 +1165,11 @@ M3Result  m3_Call  (IM3Function i_function, uint32_t i_argc, const void * i_argp
     if (i_argc != ftype->numArgs) {
         return m3Err_argumentCountMismatch;
     }
+#if !d_m3UseDirectExecutor
     if (!i_function->compiled) {
         return m3Err_missingCompiledCode;
     }
+#endif
 
 # if d_m3RecordBacktraces
     ClearBacktrace (runtime);
@@ -1034,7 +1177,9 @@ M3Result  m3_Call  (IM3Function i_function, uint32_t i_argc, const void * i_argp
 
     m3StackCheckInit();
 
+#if !d_m3UseDirectExecutor
 _   (checkStartFunction(i_function->module))
+#endif
 
     s = GetStackPointerForArgs (i_function);
 
@@ -1051,7 +1196,12 @@ _   (checkStartFunction(i_function->module))
         }
     }
 
-# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+#if d_m3UseDirectExecutor
+    result = DirectStart (i_function);
+    if (not result)
+        result = runtime->fuelEnabled ? DirectExecute (runtime, runtime->fuel, NULL)
+                                      : DirectRun (runtime);
+#elif (d_m3EnableOpProfiling || d_m3EnableOpTracing)
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
@@ -1075,9 +1225,11 @@ M3Result  m3_CallArgv  (IM3Function i_function, uint32_t i_argc, const char * i_
     if (i_argc != ftype->numArgs) {
         return m3Err_argumentCountMismatch;
     }
+#if !d_m3UseDirectExecutor
     if (!i_function->compiled) {
         return m3Err_missingCompiledCode;
     }
+#endif
 
 # if d_m3RecordBacktraces
     ClearBacktrace (runtime);
@@ -1085,7 +1237,9 @@ M3Result  m3_CallArgv  (IM3Function i_function, uint32_t i_argc, const char * i_
 
     m3StackCheckInit();
 
+#if !d_m3UseDirectExecutor
 _   (checkStartFunction(i_function->module))
+#endif
 
     s = GetStackPointerForArgs (i_function);
 
@@ -1102,7 +1256,12 @@ _   (checkStartFunction(i_function->module))
         }
     }
 
-# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+#if d_m3UseDirectExecutor
+    result = DirectStart (i_function);
+    if (not result)
+        result = runtime->fuelEnabled ? DirectExecute (runtime, runtime->fuel, NULL)
+                                      : DirectRun (runtime);
+#elif (d_m3EnableOpProfiling || d_m3EnableOpTracing)
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
     result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
@@ -1187,6 +1346,8 @@ M3Result  m3_GetResultsVL  (IM3Function i_function, va_list o_rets)
     return m3Err_none;
 }
 
+#if !d_m3UseDirectExecutor
+
 void  ReleaseCodePageNoTrack (IM3Runtime i_runtime, IM3CodePage i_codePage)
 {
     if (i_codePage)
@@ -1255,6 +1416,8 @@ void  ReleaseCodePage  (IM3Runtime i_runtime, IM3CodePage i_codePage)
 #       endif
     }
 }
+
+#endif // !d_m3UseDirectExecutor
 
 
 #if d_m3VerboseErrorMessages
@@ -1331,6 +1494,8 @@ M3BacktraceInfo *  m3_GetBacktrace  (IM3Runtime i_runtime)
 # endif
 }
 
+
+#if !d_m3UseDirectExecutor
 
 // Snapshot v1 is a process-local, same-binary/same-module continuation format.
 // It avoids serializing raw stack, memory, function, and code pointers: continuation PCs
@@ -1432,16 +1597,25 @@ static u32 SnapshotSize (IM3Runtime runtime)
                  SnapshotCountGlobals (runtime) * sizeof (M3SnapshotGlobal));
 }
 
+#endif // !d_m3UseDirectExecutor
+
 M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
 {
+#if d_m3UseDirectExecutor
+    return DirectGetSnapshotSize (runtime, out_size);
+#else
     if (not runtime or not out_size) return m3Err_snapshotInvalid;
     if (not runtime->suspended) return m3Err_snapshotUnsupported;
     *out_size = SnapshotSize (runtime);
     return m3Err_none;
+#endif
 }
 
 M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t buffer_size, uint32_t * out_size)
 {
+#if d_m3UseDirectExecutor
+    return DirectSaveSnapshot (runtime, buffer, buffer_size, out_size);
+#else
     if (not runtime or not out_size) return m3Err_snapshotInvalid;
     if (not runtime->suspended or not runtime->suspendedFunction) return m3Err_snapshotUnsupported;
     u32 need = SnapshotSize (runtime); *out_size = need;
@@ -1477,10 +1651,14 @@ M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t 
         memcpy (p, &sg, sizeof sg); p += sizeof sg;
     }
     return m3Err_none;
+#endif
 }
 
 M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uint32_t buffer_size)
 {
+#if d_m3UseDirectExecutor
+    return DirectLoadSnapshot (runtime, buffer, buffer_size);
+#else
     if (not runtime or not buffer or buffer_size < sizeof (M3SnapshotHeader)) return m3Err_snapshotInvalid;
     const u8 * p = buffer; M3SnapshotHeader h; memcpy (&h, p, sizeof h); p += sizeof h;
     if (h.magic != M3_SNAPSHOT_MAGIC or h.version != M3_SNAPSHOT_VERSION or h.headerSize != sizeof h or h.flags != M3_SNAPSHOT_FLAGS_FLOAT) return m3Err_snapshotInvalid;
@@ -1523,4 +1701,5 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
     runtime->fuel = h.fuel; runtime->fuelEnabled = h.fuelEnabled; runtime->suspended = true;
     runtime->numContinuationFrames = h.frameCount; runtime->suspendedFunction = &sm->functions[h.suspendedFunctionIndex]; runtime->lastCalled = NULL;
     return m3Err_none;
+#endif
 }

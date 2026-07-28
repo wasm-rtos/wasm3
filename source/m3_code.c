@@ -5,12 +5,15 @@
 //  Copyright © 2019 Steven Massey. All rights reserved.
 //
 
+#include "m3_config.h"
+
+#if !d_m3UseDirectExecutor
+
 #include <limits.h>
 #include "m3_code.h"
 #include "m3_env.h"
 
 //---------------------------------------------------------------------------------------------------------------------------------
-
 
 IM3CodePage  NewCodePage  (IM3Runtime i_runtime, u32 i_minNumLines)
 {
@@ -243,4 +246,4 @@ bool  MapPCToOffset  (IM3CodePage i_page, pc_t i_pc, u32 * o_moduleOffset)
 
 //---------------------------------------------------------------------------------------------------------------------------------
 
-
+#endif // !d_m3UseDirectExecutor

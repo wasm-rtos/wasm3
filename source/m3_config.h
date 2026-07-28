@@ -57,6 +57,12 @@
 #   define d_m3Use32BitSlots                    1
 # endif
 
+// Execute the original WebAssembly bytecode directly. The legacy wasm3
+// metacode backend remains available for differential testing.
+# ifndef d_m3UseDirectExecutor
+#   define d_m3UseDirectExecutor                 1
+# endif
+
 # ifndef d_m3ProfilerSlotMask
 #   define d_m3ProfilerSlotMask                 0xFFFF
 # endif

@@ -1,328 +1,139 @@
-# wasm3 runtime-control fork
+# wasm3 direct-execution fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, and **process-local runtime snapshot save/load/restore** for WebAssembly runtimes.
+This [`wasm3`](https://github.com/wasm3/wasm3) fork is the WebAssembly engine used by `wasm-rtos`.
 
-This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, and restoring snapshots into fresh runtimes created from the same WASM module.
+The default backend executes the original WebAssembly bytecode directly. It does not translate functions to wasm3 metacode and does not allocate metacode pages. The program counter always points into the module's persistent `.wasm` bytes.
 
-The original wasm3 project is a high-performance WebAssembly interpreter written in C. This fork keeps wasm3 as an interpreter, but extends it with runtime-control features needed for task scheduling, runtime swapping, and memory-pressure handling in higher-level systems.
+Floating-point instructions, raw host imports, simple WASI, fuel-based suspension, resume, and runtime snapshots remain supported.
 
-This fork is intended to be used as the WebAssembly backend for `microwasm-os`.
-
-## What this fork adds
-
-This fork adds runtime-level control features that are not part of upstream wasm3:
-
-* Per-runtime fuel control.
-* Runtime suspension when fuel is exhausted.
-* Resume support for suspended runtimes.
-* Process-local runtime snapshot save/load/restore support.
-* Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
-* Snapshot/resume support around host imports when the same imports are linked again before restoring.
-
-This fork does not add JIT or AOT compilation. It remains interpreter-only.
-
-## Public API added by this fork
+## Execution API
 
 ```c
-extern const char* m3Err_fuelExhausted;
-extern const char* m3Err_runtimeSuspended;
-extern const char* m3Err_snapshotInvalid;
-extern const char* m3Err_snapshotUnsupported;
-extern const char* m3Err_snapshotBufferTooSmall;
+M3Result m3_Start(
+    IM3Function function,
+    uint32_t argc,
+    const void *argptrs[]
+);
 
-void m3_SetFuel(IM3Runtime runtime, uint64_t fuel);
-void m3_AddFuel(IM3Runtime runtime, uint64_t fuel);
-void m3_DisableFuel(IM3Runtime runtime);
+M3Result m3_Step(IM3Runtime runtime);
 
-uint64_t m3_GetFuel(IM3Runtime runtime);
-uint32_t m3_IsFuelEnabled(IM3Runtime runtime);
+M3Result m3_Execute(
+    IM3Runtime runtime,
+    uint64_t fuel,
+    uint64_t *consumed
+);
 
-uint32_t m3_IsSuspended(IM3Runtime runtime);
-M3Result m3_Resume(IM3Runtime runtime);
+M3Result m3_Run(IM3Runtime runtime);
+```
 
+- `m3_Start()` prepares a call and does not execute its first instruction.
+- `m3_Step()` executes exactly one Core WebAssembly instruction. It returns `m3Err_fuelExhausted` if the call is still active, or the call result when that instruction finishes or traps.
+- `m3_Execute()` executes at most `fuel` instructions and optionally writes the exact number executed to `consumed`.
+- `m3_Run()` removes the fuel limit and runs until completion or a trap. An infinite WebAssembly program intentionally makes this call run forever.
+
+`m3_Call()`, `m3_CallV()`, and `m3_CallArgv()` are retained for source compatibility and use the direct executor. The existing `m3_SetFuel()`, `m3_AddFuel()`, `m3_DisableFuel()`, and `m3_Resume()` APIs are also retained.
+
+## Fuel semantics
+
+One decoded Core WebAssembly instruction costs one fuel.
+
+- Immediates are part of their instruction and cost no additional fuel.
+- A `0xFC`-prefixed instruction is one instruction.
+- `call` costs one fuel, including a call to a raw host import.
+- `memory.copy` and `memory.fill` each cost one fuel regardless of byte count.
+
+Fuel is therefore a deterministic WebAssembly instruction budget, not a wall-clock deadline. A host import or bulk-memory instruction can perform variable work atomically. A platform that needs a hard real-time limit must also bound its host functions and use a clock or hardware watchdog.
+
+Typical scheduler use:
+
+```c
+M3Result result;
+
+if (!m3_IsSuspended(runtime))
+{
+    result = m3_Start(function, argc, args);
+    if (result)
+        return result;
+}
+
+result = m3_Execute(runtime, instructions_per_slice, NULL);
+```
+
+`m3_Execute(runtime, 0, ...)` executes no instructions and leaves an active call suspended.
+
+## Direct interpreter state
+
+The interpreter stores resumable state explicitly:
+
+- a 64-bit value stack in the caller-sized wasm3 runtime stack;
+- call frames containing bytecode PCs;
+- structured-control frames for blocks, loops, conditionals, and branches;
+- runtime-local fuel and suspension state.
+
+Call and control frame arrays grow only as needed. The large legacy compiler state is not part of `M3Runtime` in the default configuration.
+
+The byte buffer passed to `m3_ParseModule()` must remain valid for the module lifetime. On a target with memory-mapped flash or ROM, that buffer can reside there and be executed directly. A block device such as an SD card is not directly addressable, so using it as executable backing storage still requires a host-side cache or paging layer.
+
+## Raw imports and WASI
+
+`m3_LinkRawFunction()` and `m3_LinkRawFunctionEx()` bind imports without generating wrapper metacode. Imported functions are checked lazily when a reachable function is entered, matching wasm3's existing lazy-link behavior.
+
+Simple WASI and floating-point execution are enabled through the same build options as before.
+
+## Runtime snapshots
+
+Snapshots can be saved when a runtime is suspended:
+
+```c
 M3Result m3_GetRuntimeSnapshotSize(
     IM3Runtime runtime,
-    uint32_t* out_size
+    uint32_t *out_size
 );
 
 M3Result m3_SaveRuntimeSnapshot(
     IM3Runtime runtime,
-    uint8_t* buffer,
+    uint8_t *buffer,
     uint32_t buffer_size,
-    uint32_t* out_size
+    uint32_t *out_size
 );
 
 M3Result m3_LoadRuntimeSnapshot(
     IM3Runtime runtime,
-    const uint8_t* buffer,
+    const uint8_t *buffer,
     uint32_t buffer_size
 );
 ```
 
-## Fuel control
+Snapshot v2 stores bytecode offsets instead of metacode addresses. Restoring therefore does not compile any functions. It includes:
 
-Fuel is runtime-local.
+- value-stack contents;
+- call and control frames;
+- linear memory and globals;
+- fuel and suspension state;
+- module/function identities and bytecode offsets.
 
-When fuel is enabled, wasm3 decreases the runtime fuel while executing WebAssembly code. When fuel reaches zero, execution stops and returns `m3Err_fuelExhausted`.
+The format is process-local and intended for controlled task swapping. It is not a reboot-safe, cross-version, cross-platform, or long-term persistence format. Restore into a fresh runtime created from the same module bytes and layout, and relink the same host imports before loading the snapshot. Host-side resources and state are not serialized.
 
-If wasm3 can capture the current continuation, the runtime becomes suspended and can later be resumed with `m3_Resume()`.
+## Backend selection
 
-Use `m3_SetFuel()` to set a new fuel value.
-
-Use `m3_AddFuel()` to add more fuel before resuming.
-
-Use `m3_DisableFuel()` to run without fuel accounting.
-
-Use `m3_GetFuel()` to read the current remaining fuel.
-
-Use `m3_IsFuelEnabled()` to check whether fuel accounting is enabled for the runtime.
-
-## Suspension and resume
-
-A runtime is suspended when execution stopped because fuel was exhausted and wasm3 captured a resumable continuation.
-
-Use `m3_IsSuspended()` to check whether a runtime is currently suspended.
-
-Use `m3_Resume()` to continue execution from the suspended point. Before resuming, add more fuel with `m3_AddFuel()` unless fuel has been disabled.
-
-Calling `m3_Call()` on a suspended runtime returns `m3Err_runtimeSuspended`.
-
-## Runtime snapshots
-
-Snapshots can only be saved from suspended runtimes.
-
-A snapshot stores enough runtime state to recreate the runtime later and continue execution from the same suspended point.
-
-Snapshot v1 stores:
-
-* Fuel state.
-* Suspended function identity.
-* Continuation frames.
-* Program-counter offsets.
-* Stack contents.
-* Linear memory.
-* Globals.
-* Register state used by continuation frames.
-* Floating-point continuation state when floating point support is enabled.
-
-Use `m3_GetRuntimeSnapshotSize()` to query the required snapshot buffer size.
-
-Use `m3_SaveRuntimeSnapshot()` to save a suspended runtime into a caller-provided byte buffer.
-
-Use `m3_LoadRuntimeSnapshot()` to restore a snapshot into a fresh runtime created from the same WASM module.
-
-## Snapshot v1 scope
-
-Snapshot v1 is intentionally limited.
-
-Snapshot v1 is:
-
-* Process-local.
-* Same-binary.
-* Same-module.
-* Same wasm3 build.
-* Intended for runtime swapping inside one running process.
-* Intended for task scheduling and RAM pressure handling in a higher-level runtime.
-
-Snapshot v1 is not:
-
-* A reboot-safe persistent format.
-* A cross-version serialization format.
-* A portable checkpoint format.
-* A save file format.
-* Guaranteed to work across different wasm3 builds, compiler settings, module layouts, platforms, or machines.
-
-The snapshot format is designed for controlled runtime swapping, not long-term persistence.
-
-## Expected snapshot flow
-
-The expected flow is:
-
-```text
-create runtime
-load the same WASM module
-link required host imports
-set fuel
-run with m3_Call()
-fuel is exhausted
-runtime becomes suspended
-save snapshot
-destroy runtime
-
-create fresh runtime
-load the same WASM module
-link the same host imports again
-load snapshot
-add fuel
-resume with m3_Resume()
-```
-
-The restored runtime must use the same WASM module layout as the original runtime.
-
-## Host imports
-
-Host imports are supported around snapshot/resume, but host-side state is not part of the wasm3 snapshot.
-
-If a module uses host imports, the same imports must be linked again before `m3_LoadRuntimeSnapshot()`.
-
-Correct order:
-
-```text
-create fresh runtime
-load same module
-link host imports
-load snapshot
-resume
-```
-
-Incorrect order:
-
-```text
-create fresh runtime
-load same module
-load snapshot
-link host imports later
-resume
-```
-
-Host-side counters, file handles, device state, OS state, graphics state, audio buffers, and external resources must be managed by the host application or OS layer.
-
-## Error values
-
-`m3Err_fuelExhausted` is returned when runtime fuel reaches zero during execution.
-
-`m3Err_runtimeSuspended` is returned when attempting to call into a runtime that is already suspended.
-
-`m3Err_snapshotInvalid` is returned when snapshot bytes are invalid, corrupted, incompatible, or do not match the current runtime/module layout.
-
-`m3Err_snapshotUnsupported` is returned when the requested snapshot operation is not supported for the current runtime state. For example, saving a snapshot from a non-suspended runtime is unsupported.
-
-`m3Err_snapshotBufferTooSmall` is returned when the provided output buffer is smaller than the required snapshot size.
-
-## Intended use in microwasm-os
-
-This fork is intended to support task-like execution of WebAssembly programs.
-
-A higher-level OS/runtime can:
-
-* Create one wasm3 runtime per task.
-* Run a task with a fixed fuel budget.
-* Stop the task when fuel is exhausted.
-* Resume the task later.
-* Save a task snapshot when it should be swapped out.
-* Destroy the runtime to release RAM.
-* Recreate the runtime later.
-* Load the snapshot.
-* Continue execution from the same suspended point.
-
-This allows `microwasm-os` to implement scheduling, sleeping, and runtime swapping above wasm3 without modifying WASM programs.
-
-## Repository notes
-
-This fork keeps the upstream wasm3 source layout where possible.
-
-Generated WASM binaries must not be committed.
-
-Temporary local test files such as `app.wasm` should remain ignored.
-
-The temporary local test harness files used during development are not part of the public fork API and should not be kept in the repository root.
-
-## Mini examples
-
-### Run with fuel and resume
+Direct execution is the default:
 
 ```c
-m3_SetFuel(runtime, 1000);
-
-M3Result result = m3_Call(function, argc, args);
-
-while (result == m3Err_fuelExhausted)
-{
-    if (!m3_IsSuspended(runtime))
-        break;
-
-    m3_AddFuel(runtime, 1000);
-    result = m3_Resume(runtime);
-}
+#define d_m3UseDirectExecutor 1
 ```
 
-### Save a suspended runtime snapshot
+Setting `d_m3UseDirectExecutor=0` at compile time restores the legacy metacode backend for differential testing. The two backends are compiled exclusively, so the unused backend does not occupy the default binary or runtime structure.
 
-```c
-uint32_t snapshot_size = 0;
+## Verification
 
-M3Result result = m3_GetRuntimeSnapshotSize(runtime, &snapshot_size);
-if (result != m3Err_none)
-{
-    return result;
-}
+The direct executor has dedicated API tests for exact stepping and fuel counts:
 
-uint8_t* snapshot = malloc(snapshot_size);
-if (!snapshot)
-{
-    return m3Err_mallocFailed;
-}
-
-result = m3_SaveRuntimeSnapshot(
-    runtime,
-    snapshot,
-    snapshot_size,
-    &snapshot_size
-);
+```sh
+sh test/direct/run.sh
 ```
 
-### Restore and resume a snapshot
-
-```c
-IM3Runtime fresh_runtime = create_runtime_from_same_wasm();
-
-link_same_host_imports(fresh_runtime);
-
-M3Result result = m3_LoadRuntimeSnapshot(
-    fresh_runtime,
-    snapshot,
-    snapshot_size
-);
-
-if (result != m3Err_none)
-{
-    return result;
-}
-
-m3_AddFuel(fresh_runtime, 1000);
-result = m3_Resume(fresh_runtime);
-```
-
-### Scheduler-style execution
-
-```c
-M3Result run_task_slice(IM3Runtime runtime, uint64_t fuel_per_slice)
-{
-    M3Result result;
-
-    if (m3_IsSuspended(runtime))
-    {
-        m3_AddFuel(runtime, fuel_per_slice);
-        result = m3_Resume(runtime);
-    }
-    else
-    {
-        m3_SetFuel(runtime, fuel_per_slice);
-        result = m3_Call(function, argc, args);
-    }
-
-    return result;
-}
-```
-
-## Development note
-
-The custom changes in this fork were designed, reviewed, and iterated with the help of ChatGPT Plus and Codex.
-
-ChatGPT Plus was used for architecture discussion, API design review, README planning, and pull request review. Codex was used to implement and iterate the code changes in this repository.
+It is also covered by the upstream Core spec suites, floating-point and multi-value workloads, WASI applications, raw-import tests, snapshot/restore tests, and the `wasm-rtos` scheduler suite.
 
 ## License
 
-This fork is based on the original wasm3 project.
-
-Keep the original wasm3 license terms and attribution when redistributing this fork.
+This fork is based on the original wasm3 project. Keep the original wasm3 license terms and attribution when redistributing it.

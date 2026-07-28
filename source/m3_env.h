@@ -118,6 +118,9 @@ typedef struct M3Module
     M3ImportInfo            memoryImport;
     bool                    memoryImported;
     const char*             memoryExportName;
+#if d_m3UseDirectExecutor
+    bool                    directValidated;
+#endif
 
     //bool                    hasWasmCodeCopy;
 
@@ -145,7 +148,9 @@ typedef struct M3Environment
 
     IM3FuncType             retFuncTypes [c_m3Type_unknown];    // these 'point' to elements in the linked list above.
                                                                 // the number of elements must match the basic types as per M3ValueType
+#if !d_m3UseDirectExecutor
     M3CodePage *            pagesReleased;
+#endif
 
     M3SectionHandler        customSectionHandler;
 }
@@ -159,6 +164,7 @@ void                        Environment_AddFuncType     (IM3Environment i_enviro
 //---------------------------------------------------------------------------------------------------------------------------------
 
 
+#if !d_m3UseDirectExecutor
 typedef struct M3ContinuationFrame
 {
     pc_t                    pc;
@@ -171,18 +177,28 @@ typedef struct M3ContinuationFrame
 # endif
 }
 M3ContinuationFrame;
+#endif
+
+#if d_m3UseDirectExecutor
+struct M3DirectFrame;
+struct M3DirectControl;
+#endif
 
 typedef struct M3Runtime
 {
+#if !d_m3UseDirectExecutor
     M3Compilation           compilation;
+#endif
 
     IM3Environment          environment;
 
+#if !d_m3UseDirectExecutor
     M3CodePage *            pagesOpen;      // linked list of code pages with writable space on them
     M3CodePage *            pagesFull;      // linked list of at-capacity pages
 
     u32                     numCodePages;
     u32                     numActiveCodePages;
+#endif
 
     IM3Module               modules;        // linked list of imported modules
 
@@ -196,9 +212,21 @@ typedef struct M3Runtime
     bool                    fuelEnabled;
     bool                    suspended;
     IM3Function             suspendedFunction;
+#if !d_m3UseDirectExecutor
     M3ContinuationFrame *   continuationFrames; // ordered outer-to-inner; resume executes from the end
     u32                     numContinuationFrames;
     u32                     maxContinuationFrames;
+#else
+    struct M3DirectFrame *  directFrames;
+    u32                     numDirectFrames;
+    u32                     maxDirectFrames;
+    struct M3DirectControl *directControls;
+    u32                     numDirectControls;
+    u32                     maxDirectControls;
+    u32                     directValueTop;
+    bool                    directActive;
+    IM3Function             directEntry;
+#endif
 
     void *                  userdata;
 
@@ -218,7 +246,9 @@ typedef struct M3Runtime
     M3BacktraceInfo         backtrace;
 #endif
 
-	u32						newCodePageSequence;
+#if !d_m3UseDirectExecutor
+    u32                     newCodePageSequence;
+#endif
 }
 M3Runtime;
 
@@ -232,9 +262,11 @@ void *                      ForEachModule               (IM3Runtime i_runtime, M
 
 void *                      v_FindFunction              (IM3Module i_module, const char * const i_name);
 
+#if !d_m3UseDirectExecutor
 IM3CodePage                 AcquireCodePage             (IM3Runtime io_runtime);
 IM3CodePage                 AcquireCodePageWithCapacity (IM3Runtime io_runtime, u32 i_lineCount);
 void                        ReleaseCodePage             (IM3Runtime io_runtime, IM3CodePage i_codePage);
+#endif
 
 d_m3EndExternC
 

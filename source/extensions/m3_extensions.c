@@ -9,6 +9,7 @@
 
 #include "m3_env.h"
 #include "m3_bind.h"
+#include "m3_direct.h"
 #include "m3_exception.h"
 
 
@@ -80,7 +81,12 @@ _       (Module_AddFunction (i_module, funcTypeIndex, NULL));
         * io_functionIndex = index;
     }
 
+#if d_m3UseDirectExecutor
+    function->directLinked = false;
+    i_module->directValidated = false;
+#else
     function->compiled = NULL;
+#endif
 
     if (function->ownsWasmCode)
         m3_Free (function->wasm);
@@ -97,7 +103,15 @@ _       (Module_AddFunction (i_module, funcTypeIndex, NULL));
     if (i_doCompilation and not i_module->runtime)
         _throw ("module must be loaded into runtime to compile function");
 
+#if d_m3UseDirectExecutor
+    if (i_doCompilation)
+    {
+_       (DirectValidateModule (i_module));
+_       (DirectValidateFunctionGraph (function));
+    }
+#else
 _   (CompileFunction (function));
+#endif
 
     _catch:
     m3_Free (ftype);

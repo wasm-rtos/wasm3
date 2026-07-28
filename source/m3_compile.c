@@ -5,6 +5,10 @@
 //  Copyright © 2019 Steven Massey. All rights reserved.
 //
 
+#include "m3_config.h"
+
+#if !d_m3UseDirectExecutor
+
 // Allow using opcodes for compilation process
 #define M3_COMPILE_OPCODES
 
@@ -2950,3 +2954,5 @@ _   (CompileBlockStatements (o));
 
     return result;
 }
+
+#endif // !d_m3UseDirectExecutor

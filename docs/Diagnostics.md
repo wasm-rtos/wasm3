@@ -1,15 +1,18 @@
 
 ## Logs
 
-To enable various logs, modify the defines in `m3_config.h`.  These are only enabled when compiled in debug mode.
+To enable various logs, modify the defines in `m3_config.h`. These are only
+enabled when compiled in debug mode. The compile, emit, and code-page logs
+apply only when the legacy backend is selected with
+`d_m3UseDirectExecutor=0`; the default direct executor creates no metacode.
 
 ```C
 # define d_m3LogParse           0   // .wasm binary decoding info
 # define d_m3LogModule          0   // Wasm module info
-# define d_m3LogCompile         0   // wasm -> metacode generation phase
+# define d_m3LogCompile         0   // legacy wasm -> metacode generation
 # define d_m3LogWasmStack       0   // dump the wasm stack when pushed or popped
-# define d_m3LogEmit            0   // metacode-generation info
-# define d_m3LogCodePages       0   // dump metacode pages when released
+# define d_m3LogEmit            0   // legacy metacode-generation info
+# define d_m3LogCodePages       0   // legacy metacode pages
 # define d_m3LogRuntime         0   // higher-level runtime information
 # define d_m3LogNativeStack     0   // track the memory usage of the C-stack
 ```
@@ -54,4 +57,3 @@ their instance counts will be printed to stderr.
             1  op_u32_Xor_ss
             1  op_i64_Subtract_ss
 ```
-

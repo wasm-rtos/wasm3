@@ -53,6 +53,11 @@ typedef struct M3Function
 
     IM3FuncType             funcType;
 
+#if d_m3UseDirectExecutor
+    M3RawCall               rawFunction;
+    voidptr_t               rawUserdata;
+    bool                    directLinked;
+#else
     pc_t                    compiled;
 
 # if (d_m3EnableCodePageRefCounting)
@@ -60,23 +65,28 @@ typedef struct M3Function
     u32                     numCodePageRefs;
 # endif
 
-# if defined (DEBUG)
-    u32                     hits;
-    u32                     index;
-# endif
-
     u16                     maxStackSlots;
 
     u16                     numRetSlots;
     u16                     numRetAndArgSlots;
+#endif
+
+#if defined (DEBUG)
+    u32                     hits;
+    u32                     index;
+#endif
 
     u16                     numLocals;                              // not including args
+#if !d_m3UseDirectExecutor
     u16                     numLocalBytes;
+#endif
 
     bool                    ownsWasmCode;
 
+#if !d_m3UseDirectExecutor
     u16                     numConstantBytes;
     void *                  constants;
+#endif
 }
 M3Function;
 

@@ -525,6 +525,17 @@ M3Result  Read_utf8  (cstr_t * o_utf8, bytes_t * io_bytes, cbytes_t i_end)
 #if d_m3RecordBacktraces
 u32  FindModuleOffset  (IM3Runtime i_runtime, pc_t i_pc)
 {
+#if d_m3UseDirectExecutor
+    const u8 * pc = (const u8 *) i_pc;
+    for (IM3Module module = i_runtime ? i_runtime->modules : NULL;
+         module;
+         module = module->next)
+    {
+        if (pc >= module->wasmStart && pc < module->wasmEnd)
+            return (u32)(pc - module->wasmStart);
+    }
+    return 0;
+#else
     // walk the code pages
     IM3CodePage curr = i_runtime->pagesOpen;
     bool pageFound = false;
@@ -563,6 +574,7 @@ u32  FindModuleOffset  (IM3Runtime i_runtime, pc_t i_pc)
         return result;
     }
     else return 0;
+#endif
 }
 
 

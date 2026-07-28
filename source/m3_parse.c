@@ -7,6 +7,7 @@
 
 #include "m3_env.h"
 #include "m3_compile.h"
+#include "m3_direct.h"
 #include "m3_exception.h"
 #include "m3_info.h"
 
@@ -306,6 +307,9 @@ _   (ReadLEB_u32 (& startFuncIndex, & i_bytes, i_end));                         
 
 M3Result  Parse_InitExpr  (M3Module * io_module, bytes_t * io_bytes, cbytes_t i_end)
 {
+#if d_m3UseDirectExecutor
+    return DirectParseInitExpression (io_module, io_bytes, i_end);
+#else
     M3Result result = m3Err_none;
 
     // this doesn't generate code pages. just walks the wasm bytecode to find the end
@@ -322,6 +326,7 @@ M3Result  Parse_InitExpr  (M3Module * io_module, bytes_t * io_bytes, cbytes_t i_
     * io_bytes = compilation.wasm;
 
     return result;
+#endif
 }
 
 
