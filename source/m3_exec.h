@@ -106,22 +106,32 @@ m3ret_t  FuelPushFrame  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHead
     );
 }
 
-m3ret_t  FuelCheckAndSave  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
-# if d_m3HasFloat
-    , f64 fp0
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+M3_NOINLINE
+m3ret_t vectorcall FuelDispatch (d_m3OpSig, cstr_t i_operationName)
+# else
+M3_NOINLINE
+m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 # endif
-)
 {
-    if (M3_LIKELY(not runtime or not runtime->fuelEnabled))
-        return m3Err_none;
-    if (M3_UNLIKELY(runtime->fuel == 0))
-        return FuelPushFrame (runtime, pc, sp, mem, r0
+    // Keep fuel accounting in this shared dispatcher. Inlining it into every
+    // metacode operation substantially increases the interpreter's flash size.
+    if (M3_UNLIKELY(_runtime and _runtime->fuelEnabled))
+    {
+        if (M3_UNLIKELY(_runtime->fuel == 0))
+            return FuelPushFrame (_runtime, _pc, _sp, _mem, _r0
 # if d_m3HasFloat
-            , fp0
+                , _fp0
 # endif
-        );
-    runtime->fuel--;
-    return m3Err_none;
+            );
+        _runtime->fuel--;
+    }
+
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+    M3_MUSTTAIL return ((IM3Operation)(*_pc))(_runtime, _pc + 1, d_m3OpArgs, i_operationName);
+# else
+    M3_MUSTTAIL return nextOpImpl();
+# endif
 }
 
 # define rewrite_op(OP)             * ((void **) (_pc-1)) = (void*)(OP)

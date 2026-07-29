@@ -26,6 +26,7 @@ endif()
 set_property(CACHE BUILD_WASI PROPERTY STRINGS none simple uvwasi metawasi)
 
 option(BUILD_NATIVE "Build with machine-specific optimisations" ON)
+option(BUILD_FUEL_TEST "Build the fuel/resume regression test" OFF)
 
 set(OUT_FILE "wasm3")
 
@@ -228,6 +229,16 @@ else()
 endif()
 
 add_subdirectory(source)
+
+if(BUILD_FUEL_TEST AND NOT WASIENV AND NOT EMSCRIPTEN AND NOT EMSCRIPTEN_LIB)
+  enable_testing()
+  add_executable(wasm3-fuel-test "test/fuel.c")
+  target_link_libraries(wasm3-fuel-test m3)
+  if(NOT MSVC)
+    target_link_libraries(wasm3-fuel-test m)
+  endif()
+  add_test(NAME wasm3-fuel COMMAND wasm3-fuel-test)
+endif()
 
 message("Flags:         ${CMAKE_C_FLAGS}")
 message("Debug flags:   ${CMAKE_C_FLAGS_DEBUG}")
