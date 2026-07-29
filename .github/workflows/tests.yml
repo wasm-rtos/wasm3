@@ -353,7 +353,7 @@ jobs:
   cross-qemu:
     runs-on: ubuntu-latest
     name: cross-qemu-${{ matrix.config.target }}
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -400,7 +400,7 @@ jobs:
       if: ${{ !matrix.config.skip_wasi }}
       run: |
         cd test
-        python3 run-wasi-test.py --fast --exec "${{ matrix.config.qemu }} ../build/wasm3"
+        python3 run-wasi-test.py --fast --timeout 300 --exec "${{ matrix.config.qemu }} ../build/wasm3"
 
   platformio:
     runs-on: ubuntu-latest

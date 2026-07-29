@@ -203,12 +203,23 @@ elseif(BUILD_WASI MATCHES "uvwasi")
   set(INSTALL_UVWASI OFF CACHE BOOL "" FORCE)
 
   FetchContent_Declare(
+    libuv
+    GIT_REPOSITORY  https://github.com/libuv/libuv.git
+    GIT_TAG         v1.52.1
+  )
+  FetchContent_Declare(
     uvwasi
     GIT_REPOSITORY  https://github.com/nodejs/uvwasi.git
     GIT_TAG         0820128569533c855d60c0f6382acbb14aa62ad2
   )
+  FetchContent_MakeAvailable(libuv)
+  set(LIBUV_INCLUDE_DIR "${libuv_SOURCE_DIR}/include")
+  set(LIBUV_LIBRARIES uv_a)
   FetchContent_MakeAvailable(uvwasi)
-  include_directories("${uvwasi_SOURCE_DIR}/include")
+  include_directories(
+    "${uvwasi_SOURCE_DIR}/include"
+    "${LIBUV_INCLUDE_DIR}"
+  )
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Dd_m3HasUVWASI")
   target_link_libraries(${OUT_FILE} uvwasi_a uv_a)
 endif()
