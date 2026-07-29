@@ -27,6 +27,7 @@ set_property(CACHE BUILD_WASI PROPERTY STRINGS none simple uvwasi metawasi)
 
 option(BUILD_NATIVE "Build with machine-specific optimisations" ON)
 option(BUILD_FUEL_TEST "Build the fuel/resume regression test" OFF)
+option(BUILD_SHARED_MEMORY_TEST "Build the shared runtime memory regression test" OFF)
 
 set(OUT_FILE "wasm3")
 
@@ -238,6 +239,16 @@ if(BUILD_FUEL_TEST AND NOT WASIENV AND NOT EMSCRIPTEN AND NOT EMSCRIPTEN_LIB)
     target_link_libraries(wasm3-fuel-test m)
   endif()
   add_test(NAME wasm3-fuel COMMAND wasm3-fuel-test)
+endif()
+
+if(BUILD_SHARED_MEMORY_TEST AND NOT WASIENV AND NOT EMSCRIPTEN AND NOT EMSCRIPTEN_LIB)
+  enable_testing()
+  add_executable(wasm3-shared-memory-test "test/shared_memory.c")
+  target_link_libraries(wasm3-shared-memory-test m3)
+  if(NOT MSVC)
+    target_link_libraries(wasm3-shared-memory-test m)
+  endif()
+  add_test(NAME wasm3-shared-memory COMMAND wasm3-shared-memory-test)
 endif()
 
 message("Flags:         ${CMAKE_C_FLAGS}")
