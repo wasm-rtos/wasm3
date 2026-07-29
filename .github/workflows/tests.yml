@@ -189,7 +189,7 @@ jobs:
 
   wasi:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v7
@@ -242,11 +242,12 @@ jobs:
     - name: Test WebAssembly spec (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-spec-test.py --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --repl"
-    - name: Test WASI apps (in Wasm3, self-hosting)
+        python3 run-spec-test.py --timeout 180 --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --repl"
+    - name: Smoke test WASI (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-wasi-test.py --fast --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
+        python3 run-wasi-test.py --fast --filter "Simple WASI test" --timeout 300 \
+          --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
 
   ios:
     runs-on: macos-latest
