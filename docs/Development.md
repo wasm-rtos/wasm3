@@ -99,9 +99,6 @@ This can be useful for cross-compilation, quick builds or when a build system (C
 gcc -O3 -g0 -s -Isource -Dd_m3HasWASI source/*.c platforms/app/main.c -lm -o wasm3
 ```
 
-This builds the direct bytecode executor. There is no generated intermediate
-instruction stream or alternative execution backend.
-
 ### msvc/clang-cl
 ```sh
 cl source/*.c platforms/app/main.c /Isource /MD /Ox /Oy /Gw /GS- /W0 /Dd_m3HasWASI /Fewasm3.exe /link advapi32.lib

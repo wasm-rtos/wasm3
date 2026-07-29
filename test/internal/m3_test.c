@@ -62,6 +62,82 @@ int  main  (int argc, const char  * argv [])
         m3_Free (ftype);
         m3_Free (ftype2);
     }
+    
+    
+    Test (codepages.simple)
+    {
+        M3Environment env = { 0 };
+        M3Runtime runtime = { 0 };
+        runtime.environment = & env;
+        
+        IM3CodePage page = AcquireCodePage (& runtime);                 expect (page);
+                                                                        expect (runtime.numCodePages == 1);
+                                                                        expect (runtime.numActiveCodePages == 1);
+        
+        IM3CodePage page2 = AcquireCodePage (& runtime);                expect (page2);
+                                                                        expect (runtime.numCodePages == 2);
+                                                                        expect (runtime.numActiveCodePages == 2);
+
+        ReleaseCodePage (& runtime, page);                              expect (runtime.numCodePages == 2);
+                                                                        expect (runtime.numActiveCodePages == 1);
+
+        ReleaseCodePage (& runtime, page2);                             expect (runtime.numCodePages == 2);
+                                                                        expect (runtime.numActiveCodePages == 0);
+        
+        Runtime_Release (& runtime);                                    expect (CountCodePages (env.pagesReleased) == 2);
+        Environment_Release (& env);                                    expect (CountCodePages (env.pagesReleased) == 0);
+    }
+    
+    
+	Test (codepages.b)
+    {
+        const u32 c_numPages = 2000;
+        IM3CodePage pages [2000] = { NULL };
+        
+        M3Environment env = { 0 };
+        M3Runtime runtime = { 0 };
+        runtime.environment = & env;
+
+        u32 numActive = 0;
+        
+        for (u32 i = 0; i < 2000000; ++i)
+        {
+            u32 index = rand () % c_numPages;   // printf ("%5u ", index);
+            
+            if (pages [index] == NULL)
+            {
+//                printf ("acq\n");
+                pages [index] = AcquireCodePage (& runtime);
+                ++numActive;
+            }
+            else
+            {
+//                printf ("rel\n");
+                ReleaseCodePage (& runtime, pages [index]);
+                pages [index] = NULL;
+                --numActive;
+            }
+                
+            expect (runtime.numActiveCodePages == numActive);
+        }
+          
+        printf ("num pages: %d\n", runtime.numCodePages);
+        
+        for (u32 i = 0; i < c_numPages; ++i)
+        {
+            if (pages [i])
+            {
+                ReleaseCodePage (& runtime, pages [i]);
+                pages [i] = NULL;
+                --numActive;                                            expect (runtime.numActiveCodePages == numActive);
+            }
+        }
+        
+        Runtime_Release (& runtime);
+        Environment_Release (& env);
+    }
+     
+     
     Test (extensions)
     {
         M3Result result;
@@ -81,7 +157,7 @@ int  main  (int argc, const char  * argv [])
                         0x0b        // end block
         };
         
-        // Validation requires the module to be attached to a runtime.
+        // will partially fail (compilation) because module isn't attached to a runtime yet.
         result = m3_InjectFunction (module, & functionIndex, "i()", wasm, true);        expect (result != m3Err_none)
                                                                                         expect (functionIndex >= 0)
 

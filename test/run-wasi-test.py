@@ -8,7 +8,6 @@
 #   ./run-wasi-test.py --exec "wasmer run --mapdir=/:. wasm3.wasm --" --fast
 #   ./run-wasi-test.py --exec "wasmtime --dir=. wasm3.wasm --" --fast
 #   ./run-wasi-test.py --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm" --fast
-#   ./run-wasi-test.py --fast --filter "Simple WASI test"
 
 import argparse
 import sys
@@ -30,7 +29,6 @@ parser.add_argument("--exec", metavar="<interpreter>", default="../build/wasm3")
 parser.add_argument("--separate-args",  action='store_true')      # use "--" separator for wasmer, wasmtime
 parser.add_argument("--timeout", type=int,             default=120)
 parser.add_argument("--fast",    action='store_true')
-parser.add_argument("--filter",   metavar="<name pattern>")
 
 args = parser.parse_args()
 
@@ -153,13 +151,6 @@ def fail(msg):
     stats.failed += 1
 
 commands = commands_fast if args.fast else commands_full
-if args.filter:
-    commands = [
-        command for command in commands
-        if fnmatch.fnmatch(command["name"], args.filter)
-    ]
-    if not commands:
-        parser.error("no WASI tests match --filter")
 
 for cmd in commands:
     if "skip" in cmd:

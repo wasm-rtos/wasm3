@@ -5,9 +5,11 @@ set(sources
     "m3_api_meta_wasi.c"
     "m3_api_tracer.c"
     "m3_bind.c"
+    "m3_code.c"
+    "m3_compile.c"
     "m3_core.c"
-    "m3_direct.c"
     "m3_env.c"
+    "m3_exec.c"
     "m3_function.c"
     "m3_info.c"
     "m3_module.c"
@@ -51,3 +53,4 @@ elseif(BUILD_WASI MATCHES "uvwasi")
     target_compile_definitions(m3 PUBLIC d_m3HasUVWASI)
     include_directories("${libuv_SOURCE_DIR}/include")
 endif()
+
