@@ -59,31 +59,13 @@ typedef const u8 * const        cbytes_t;
 
 typedef u16                     m3opcode_t;
 
-enum
-{
-    c_waOp_block                = 0x02,
-    c_waOp_loop                 = 0x03,
-    c_waOp_if                   = 0x04,
-    c_waOp_else                 = 0x05,
-    c_waOp_end                  = 0x0b,
-    c_waOp_branch               = 0x0c,
-    c_waOp_branchIf             = 0x0d,
-    c_waOp_branchTable          = 0x0e,
-    c_waOp_call                 = 0x10,
-    c_waOp_getLocal             = 0x20,
-    c_waOp_setLocal             = 0x21,
-    c_waOp_teeLocal             = 0x22,
-    c_waOp_getGlobal            = 0x23,
-    c_waOp_i32_const            = 0x41,
-    c_waOp_i64_const            = 0x42,
-    c_waOp_f32_const            = 0x43,
-    c_waOp_f64_const            = 0x44,
-    c_waOp_extended             = 0xfc,
-    c_waOp_memoryCopy           = 0xfc0a,
-    c_waOp_memoryFill           = 0xfc0b
-};
+typedef i64                     m3reg_t;
 
+# if d_m3Use32BitSlots
+typedef u32                     m3slot_t;
+# else
 typedef u64                     m3slot_t;
+# endif
 
 typedef m3slot_t *              m3stack_t;
 
@@ -98,6 +80,24 @@ const void * const  cvptr_t;
 #       define m3log_parse(CATEGORY, FMT, ...)          d_m3Log(CATEGORY, FMT, ##__VA_ARGS__)
 #   else
 #       define m3log_parse(...) {}
+#   endif
+
+#   if d_m3LogCompile
+#       define m3log_compile(CATEGORY, FMT, ...)        d_m3Log(CATEGORY, FMT, ##__VA_ARGS__)
+#   else
+#       define m3log_compile(...) {}
+#   endif
+
+#   if d_m3LogEmit
+#       define m3log_emit(CATEGORY, FMT, ...)           d_m3Log(CATEGORY, FMT, ##__VA_ARGS__)
+#   else
+#       define m3log_emit(...) {}
+#   endif
+
+#   if d_m3LogCodePages
+#       define m3log_code(CATEGORY, FMT, ...)           d_m3Log(CATEGORY, FMT, ##__VA_ARGS__)
+#   else
+#       define m3log_code(...) {}
 #   endif
 
 #   if d_m3LogModule
@@ -125,6 +125,10 @@ const void * const  cvptr_t;
 #   define d_m3Assert(ASS)
 # endif
 
+typedef void /*const*/ *                    code_t;
+typedef code_t const * /*__restrict__*/     pc_t;
+
+
 typedef struct M3MemoryHeader
 {
     IM3Runtime      runtime;
@@ -133,9 +137,30 @@ typedef struct M3MemoryHeader
 }
 M3MemoryHeader;
 
-#define m3MemData(mem)                 (u8*)(((M3MemoryHeader*)(mem)) + 1)
+struct M3CodeMappingPage;
+
+typedef struct M3CodePageHeader
+{
+    struct M3CodePage *           next;
+
+    u32                           lineIndex;
+    u32                           numLines;
+    u32                           sequence;       // this is just used for debugging; could be removed
+    u32                           usageCount;
+
+# if d_m3RecordBacktraces
+    struct M3CodeMappingPage *    mapping;
+# endif // d_m3RecordBacktraces
+}
+M3CodePageHeader;
+
+
+#define d_m3CodePageFreeLinesThreshold      4+2       // max is: select _sss & CallIndirect + 2 for bridge
 
 #define d_m3DefaultMemPageSize              65536
+
+#define d_m3Reg0SlotAlias                   60000
+#define d_m3Fp0SlotAlias                    (d_m3Reg0SlotAlias + 2)
 
 #define d_m3MaxSaneTypesCount               1000000
 #define d_m3MaxSaneFunctionsCount           1000000
@@ -171,6 +196,8 @@ M3Result m3Error (M3Result i_result, IM3Runtime i_runtime, IM3Module i_module, I
 
 #define ErrorRuntime(RESULT, RUNTIME, FORMAT, ...)      _m3Error (RESULT, RUNTIME, NULL, NULL,  __FILE__, __LINE__, FORMAT, ##__VA_ARGS__)
 #define ErrorModule(RESULT, MOD, FORMAT, ...)           _m3Error (RESULT, MOD->runtime, MOD, NULL,  __FILE__, __LINE__, FORMAT, ##__VA_ARGS__)
+#define ErrorCompile(RESULT, COMP, FORMAT, ...)         _m3Error (RESULT, COMP->runtime, COMP->module, NULL, __FILE__, __LINE__, FORMAT, ##__VA_ARGS__)
+
 #if d_m3LogNativeStack
 void        m3StackCheckInit        ();
 void        m3StackCheck            ();
@@ -257,6 +284,8 @@ M3Result    Read_f64                (f64 * o_value, bytes_t * io_bytes, cbytes_t
 M3Result    Read_f32                (f32 * o_value, bytes_t * io_bytes, cbytes_t i_end);
 #endif
 M3Result    Read_u8                 (u8  * o_value, bytes_t * io_bytes, cbytes_t i_end);
+M3Result    Read_opcode             (m3opcode_t * o_value, bytes_t  * io_bytes, cbytes_t i_end);
+
 M3Result    ReadLebUnsigned         (u64 * o_value, u32 i_maxNumBits, bytes_t * io_bytes, cbytes_t i_end);
 M3Result    ReadLebSigned           (i64 * o_value, u32 i_maxNumBits, bytes_t * io_bytes, cbytes_t i_end);
 M3Result    ReadLEB_u32             (u32 * o_value, bytes_t * io_bytes, cbytes_t i_end);
@@ -266,10 +295,13 @@ M3Result    ReadLEB_i32             (i32 * o_value, bytes_t * io_bytes, cbytes_t
 M3Result    ReadLEB_i64             (i64 * o_value, bytes_t * io_bytes, cbytes_t i_end);
 M3Result    Read_utf8               (cstr_t * o_utf8, bytes_t * io_bytes, cbytes_t i_end);
 
+cstr_t      SPrintValue             (void * i_value, u8 i_type);
+size_t      SPrintArg               (char * o_string, size_t i_stringBufferSize, voidptr_t i_sp, u8 i_type);
+
 void        ReportError             (IM3Runtime io_runtime, IM3Module i_module, IM3Function i_function, ccstr_t i_errorMessage, ccstr_t i_file, u32 i_lineNum);
 
 # if d_m3RecordBacktraces
-void        PushBacktraceFrame         (IM3Runtime io_runtime, bytes_t i_pc);
+void        PushBacktraceFrame         (IM3Runtime io_runtime, pc_t i_pc);
 void        FillBacktraceFunctionInfo  (IM3Runtime io_runtime, IM3Function i_function);
 void        ClearBacktrace             (IM3Runtime io_runtime);
 # endif

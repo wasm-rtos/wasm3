@@ -6,7 +6,7 @@
 //
 
 #include "m3_env.h"
-#include "m3_direct.h"
+#include "m3_compile.h"
 #include "m3_exception.h"
 #include "m3_info.h"
 
@@ -306,7 +306,22 @@ _   (ReadLEB_u32 (& startFuncIndex, & i_bytes, i_end));                         
 
 M3Result  Parse_InitExpr  (M3Module * io_module, bytes_t * io_bytes, cbytes_t i_end)
 {
-    return DirectParseInitExpression (io_module, io_bytes, i_end);
+    M3Result result = m3Err_none;
+
+    // this doesn't generate code pages. just walks the wasm bytecode to find the end
+
+#if defined(d_m3PreferStaticAlloc)
+    static M3Compilation compilation;
+#else
+    M3Compilation compilation;
+#endif
+    compilation = (M3Compilation){ .runtime = NULL, .module = io_module, .wasm = * io_bytes, .wasmEnd = i_end };
+
+    result = CompileBlockStatements (& compilation);
+
+    * io_bytes = compilation.wasm;
+
+    return result;
 }
 
 
@@ -348,15 +363,38 @@ _       (ReadLEB_u32 (& size, & i_bytes, i_end));
 
         if (size)
         {
+            const u8 * ptr = i_bytes;
             i_bytes += size;
 
             if (i_bytes <= i_end)
             {
+                /*
+                u32 numLocalBlocks;
+_               (ReadLEB_u32 (& numLocalBlocks, & ptr, i_end));                                      m3log (parse, "    code size: %-4d", size);
+
+                u32 numLocals = 0;
+
+                for (u32 l = 0; l < numLocalBlocks; ++l)
+                {
+                    u32 varCount;
+                    i8 wasmType;
+                    u8 normalType;
+
+_                   (ReadLEB_u32 (& varCount, & ptr, i_end));
+_                   (ReadLEB_i7 (& wasmType, & ptr, i_end));
+_                   (NormalizeType (& normalType, wasmType));
+
+                    numLocals += varCount;                                                      m3log (parse, "      %2d locals; type: '%s'", varCount, c_waTypes [normalType]);
+                }
+                 */
+
                 IM3Function func = Module_GetFunction (io_module, f + io_module->numFuncImports);
 
                 func->module = io_module;
                 func->wasm = start;
                 func->wasmEnd = i_bytes;
+                //func->ownsWasmCode = io_module->hasWasmCodeCopy;
+//                func->numLocals = numLocals;
             }
             else _throw (m3Err_wasmSectionOverrun);
         }

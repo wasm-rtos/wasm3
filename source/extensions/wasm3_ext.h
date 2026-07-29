@@ -38,7 +38,7 @@ extern "C" {
                                                      int32_t *              io_functionIndex,
                                                      const char * const     i_signature,
                                                      const uint8_t * const  i_wasmBytes,            // i_wasmBytes is copied
-                                                     bool                   i_doValidation);
+                                                     bool                   i_doCompilation);
 
 
     IM3Function         m3_GetFunctionByIndex       (IM3Module              i_module,

@@ -187,12 +187,30 @@ typedef int8_t          i8;
 
 # if defined(ARDUINO) || defined(PARTICLE) || defined(PLATFORMIO) || defined(__MBED__) || \
      defined(ESP8266) || defined(ESP32) || defined(BLUE_PILL) || defined(WM_W600) || defined(FOMU)
+# ifndef d_m3CascadedOpcodes
+#   define d_m3CascadedOpcodes                  0
+# endif
 #  ifndef d_m3VerboseErrorMessages
 #    define d_m3VerboseErrorMessages            0
 #  endif
+# ifndef d_m3MaxConstantTableSize
+#   define d_m3MaxConstantTableSize             64
+# endif
 #  ifndef d_m3MaxFunctionStackHeight
 #    define d_m3MaxFunctionStackHeight          128
 #  endif
+#  ifndef d_m3CodePageAlignSize
+#    define d_m3CodePageAlignSize               1024
+#  endif
 # endif
+
+/*
+ * Arch-specific defaults
+ */
+#if defined(__riscv) && (__riscv_xlen == 64)
+#  ifndef d_m3Use32BitSlots
+#    define d_m3Use32BitSlots                   0
+#  endif
+#endif
 
 #endif // m3_config_platforms_h

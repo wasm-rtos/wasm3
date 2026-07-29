@@ -79,7 +79,7 @@ typedef enum M3ValueType
     // Opaque 16-byte slot used purely so wasm3 can PARSE modules
     // whose function signatures or local-variable declarations
     // mention v128 (the SIMD value type, wasm-encoded as 0x7B).
-    // Actual v128 OPCODES still error when execution reaches them with
+    // Actual v128 OPCODES still error at compile-time with
     // m3Err_unknownOpcode — we only avoid the parse-time
     // m3Err_invalidTypeId rejection. LLVM's auto-vectorizer emits
     // unused v128 locals into many `+simd128` modules even when no
@@ -167,16 +167,19 @@ d_m3ErrorConst  (functionImportMissing,         "missing imported function")
 
 d_m3ErrorConst  (malformedFunctionSignature,    "malformed function signature")
 
-// validation and execution errors
+// compilation errors
+d_m3ErrorConst  (noCompiler,                    "no compiler found for opcode")
 d_m3ErrorConst  (unknownOpcode,                 "unknown opcode")
 d_m3ErrorConst  (restrictedOpcode,              "restricted opcode")
-d_m3ErrorConst  (functionStackOverflow,         "function exceeded its stack height limit")
-d_m3ErrorConst  (functionStackUnderrun,         "function value stack underrun")
+d_m3ErrorConst  (functionStackOverflow,         "compiling function overran its stack height limit")
+d_m3ErrorConst  (functionStackUnderrun,         "compiling function underran the stack")
+d_m3ErrorConst  (mallocFailedCodePage,          "memory allocation failed when acquiring a new M3 code page")
 d_m3ErrorConst  (settingImmutableGlobal,        "attempting to set an immutable global")
 d_m3ErrorConst  (typeMismatch,                  "incorrect type on stack")
 d_m3ErrorConst  (typeCountMismatch,             "incorrect value count on stack")
 
 // runtime errors
+d_m3ErrorConst  (missingCompiledCode,           "function is missing compiled m3 code")
 d_m3ErrorConst  (wasmMemoryOverflow,            "runtime ran out of memory")
 d_m3ErrorConst  (globalMemoryNotAllocated,      "global memory is missing from a module")
 d_m3ErrorConst  (globaIndexOutOfBounds,         "global index is too large")
@@ -234,12 +237,6 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     // This is used internally by Raw Function helpers
     uint32_t            m3_GetMemorySize            (IM3Runtime             i_runtime);
 
-    // Current runtime-owned allocation size. Includes the runtime object,
-    // value stack, linear memory, and direct-executor frame/control buffers.
-    // Excludes environments, modules, the original Wasm bytes, userdata, and
-    // allocator metadata.
-    uint64_t            m3_GetRuntimeMemoryUsage    (IM3Runtime             i_runtime);
-
     void *              m3_GetUserData              (IM3Runtime             i_runtime);
 
     M3Result            m3_GetRuntimeSnapshotSize (IM3Runtime             runtime,
@@ -272,6 +269,9 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
 
     //  LoadModule transfers ownership of a module to the runtime. Do not free modules once successfully loaded into the runtime
     M3Result            m3_LoadModule               (IM3Runtime io_runtime,  IM3Module io_module);
+
+    // Optional, compiles all functions in the module
+    M3Result            m3_CompileModule            (IM3Module io_module);
 
     // Calling m3_RunStart is optional
     M3Result            m3_RunStart                 (IM3Module i_module);
@@ -337,23 +337,6 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     uint32_t            m3_IsFuelEnabled          (IM3Runtime runtime);
     uint32_t            m3_IsSuspended            (IM3Runtime runtime);
     M3Result            m3_Resume                 (IM3Runtime runtime);
-
-    // Begin a call without executing its first instruction.
-    M3Result            m3_Start                  (IM3Function function,
-                                                   uint32_t argc,
-                                                   const void * argptrs[]);
-
-    // Execute exactly one Core WebAssembly instruction.
-    M3Result            m3_Step                   (IM3Runtime runtime);
-
-    // Execute at most `fuel` Core WebAssembly instructions. A 0xFC-prefixed
-    // instruction is still one instruction and therefore costs one fuel.
-    M3Result            m3_Execute                (IM3Runtime runtime,
-                                                   uint64_t fuel,
-                                                   uint64_t * consumed);
-
-    // Execute without a fuel limit. This can intentionally run forever.
-    M3Result            m3_Run                    (IM3Runtime runtime);
 
     M3Result            m3_CallV                    (IM3Function i_function, ...);
     M3Result            m3_CallVL                   (IM3Function i_function, va_list i_args);

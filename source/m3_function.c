@@ -83,6 +83,7 @@ void FreeImportInfo (M3ImportInfo * i_info)
 
 void  Function_Release  (IM3Function i_function)
 {
+    m3_Free (i_function->constants);
 
     for (int i = 0; i < i_function->numNames; i++)
     {
@@ -97,6 +98,39 @@ void  Function_Release  (IM3Function i_function)
 
     if (i_function->ownsWasmCode)
         m3_Free (i_function->wasm);
+
+    // Function_FreeCompiledCode (func);
+
+#   if (d_m3EnableCodePageRefCounting)
+    {
+        m3_Free (i_function->codePageRefs);
+        i_function->numCodePageRefs = 0;
+    }
+#   endif
+}
+
+
+void  Function_FreeCompiledCode (IM3Function i_function)
+{
+#   if (d_m3EnableCodePageRefCounting)
+    {
+        i_function->compiled = NULL;
+
+        while (i_function->numCodePageRefs--)
+        {
+            IM3CodePage page = i_function->codePageRefs [i_function->numCodePageRefs];
+
+            if (--(page->info.usageCount) == 0)
+            {
+//                printf ("free %p\n", page);
+            }
+        }
+
+        m3_Free (i_function->codePageRefs);
+
+        Runtime_ReleaseCodePages (i_function->module->runtime);
+    }
+#   endif
 }
 
 
@@ -196,3 +230,4 @@ u32  GetFunctionNumArgsAndLocals (IM3Function i_function)
     else
         return 0;
 }
+
