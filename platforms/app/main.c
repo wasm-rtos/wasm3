@@ -432,11 +432,6 @@ M3Result repl_global_set  (const char* name, const char* value)
     return m3_SetGlobal (g, &tagged);
 }
 
-M3Result repl_compile  ()
-{
-    return m3_CompileModule(runtime->modules);
-}
-
 M3Result repl_dump  ()
 {
     uint32_t len;
@@ -551,7 +546,6 @@ void print_usage() {
     puts("Options:");
     puts("  --func <function>     function to run       default: _start");
     puts("  --stack-size <size>   stack size in bytes   default: 64KB");
-    puts("  --compile             disable lazy compilation");
     puts("  --dump-on-trap        dump wasm memory");
     puts("  --gas-limit           set gas limit");
 }
@@ -567,7 +561,6 @@ int  main  (int i_argc, const char* i_argv[])
 
     bool argRepl = false;
     bool argDumpOnTrap = false;
-    bool argCompile = false;
     const char* argFile = NULL;
     const char* argFunc = "_start";
     unsigned argStackSize = 64*1024;
@@ -592,8 +585,6 @@ int  main  (int i_argc, const char* i_argv[])
             argRepl = true;
         } else if (!strcmp("--dump-on-trap", arg)) {
             argDumpOnTrap = true;
-        } else if (!strcmp("--compile", arg)) {
-            argCompile = true;
         } else if (!strcmp("--stack-size", arg)) {
             const char* tmp = "65536";
             ARGV_SET(tmp);
@@ -626,10 +617,6 @@ int  main  (int i_argc, const char* i_argv[])
     if (argFile) {
         result = repl_load(argFile);
         if (result) FATAL("repl_load: %s", result);
-
-        if (argCompile) {
-            repl_compile();
-        }
 
         if (argFunc and not argRepl) {
             if (!strcmp(argFunc, "_start")) {
@@ -680,8 +667,6 @@ int  main  (int i_argc, const char* i_argv[])
             result = repl_global_set(argv[1], argv[2]);
         } else if (!strcmp(":dump", argv[0])) {
             result = repl_dump();
-        } else if (!strcmp(":compile", argv[0])) {
-            result = repl_compile();
         } else if (!strcmp(":invoke", argv[0])) {
             unescape(argv[1]);
             result = repl_invoke(argv[1], argc-2, (const char**)(argv+2));

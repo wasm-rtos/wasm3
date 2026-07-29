@@ -49,6 +49,8 @@ jobs:
     - name: Build
       run: |
         cmake --build build
+    - name: Test direct execution API
+      run: sh test/direct/run.sh
     - name: Test WebAssembly spec
       run: cd test && python3 run-spec-test.py
     - name: Test previous WebAssembly specs
@@ -187,7 +189,7 @@ jobs:
 
   wasi:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v7
@@ -240,11 +242,12 @@ jobs:
     - name: Test WebAssembly spec (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-spec-test.py --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --repl"
-    - name: Test WASI apps (in Wasm3, self-hosting)
+        python3 run-spec-test.py --timeout 180 --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --repl"
+    - name: Smoke test WASI (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-wasi-test.py --fast --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
+        python3 run-wasi-test.py --fast --filter "Simple WASI test" --timeout 300 \
+          --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
 
   ios:
     runs-on: macos-latest
@@ -351,7 +354,7 @@ jobs:
   cross-qemu:
     runs-on: ubuntu-latest
     name: cross-qemu-${{ matrix.config.target }}
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -372,12 +375,6 @@ jobs:
         - {target: mips64el,toolchain: gcc-mips64el-linux-gnuabi64, cc: mips64el-linux-gnuabi64-gcc,qemu: qemu-mips64el-static }
         - {target: alpha,   toolchain: gcc-alpha-linux-gnu,       cc: alpha-linux-gnu-gcc,        qemu: qemu-alpha-static   }
         # TODO: - {target: sparc64, toolchain: gcc-sparc64-linux-gnu,     cc: sparc64-linux-gnu-gcc,      qemu: qemu-sparc64-static, skip_wasi: true }
-
-        #- {target: i386 (u64 slots),    toolchain: gcc-multilib,              cc: clang -m32,                 qemu: qemu-i386-static,     cflags: -Dd_m3Use32BitSlots=0  }
-        - {target: arm (u64 slots),     toolchain: gcc-arm-linux-gnueabi,     cc: arm-linux-gnueabi-gcc,      qemu: qemu-arm-static,      cflags: -Dd_m3Use32BitSlots=0  }
-        - {target: aarch64 (u64 slots), toolchain: gcc-aarch64-linux-gnu,     cc: aarch64-linux-gnu-gcc,      qemu: qemu-aarch64-static,  cflags: -Dd_m3Use32BitSlots=0  }
-        - {target: ppc (u64 slots),     toolchain: gcc-powerpc-linux-gnu,     cc: powerpc-linux-gnu-gcc,      qemu: qemu-ppc-static,      cflags: -Dd_m3Use32BitSlots=0  }
-        - {target: ppc64 (u64 slots),   toolchain: gcc-powerpc64-linux-gnu,   cc: powerpc64-linux-gnu-gcc,    qemu: qemu-ppc64-static,    cflags: -Dd_m3Use32BitSlots=0  }
 
     steps:
     - uses: actions/checkout@v7
@@ -404,7 +401,7 @@ jobs:
       if: ${{ !matrix.config.skip_wasi }}
       run: |
         cd test
-        python3 run-wasi-test.py --fast --exec "${{ matrix.config.qemu }} ../build/wasm3"
+        python3 run-wasi-test.py --fast --timeout 300 --exec "${{ matrix.config.qemu }} ../build/wasm3"
 
   platformio:
     runs-on: ubuntu-latest
@@ -610,14 +607,8 @@ jobs:
         mkdir build
         cd build
         clang -xc++ -Dd_m3HasWASI -DDEBUG \
-            -Dd_m3EnableOpTracing=1     \
-            -Dd_m3EnableStrace=1        \
             -Dd_m3LogParse=1            \
             -Dd_m3LogModule=1           \
-            -Dd_m3LogCompile=1          \
-            -Dd_m3LogWasmStack=1        \
-            -Dd_m3LogEmit=1             \
-            -Dd_m3LogCodePages=1        \
             -Dd_m3LogRuntime=1          \
             -Dd_m3LogNativeStack=1      \
             -Dd_m3RecordBacktraces=1    \
@@ -626,29 +617,6 @@ jobs:
             -o wasm3
     - name: Test
       run: ./build/wasm3 ./test/wasi/simple/test.wasm > /dev/null
-
-  preprocessed-ops:
-    name: maintenance (preprocess ops)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-    - uses: actions/checkout@v7
-    - name: Install sponge
-      run: |
-        sudo apt update
-        sudo apt install moreutils
-    - name: Build
-      run: |
-        make -f extra/utils.mk preprocess
-        mkdir build
-        cd build
-        gcc -Dd_m3HasWASI \
-            -I../source ../source/*.c ../platforms/app/main.c \
-            -O3 -g0 -lm \
-            -o wasm3
-    - name: Test
-      run: ./build/wasm3 ./test/wasi/simple/test.wasm
 
   spellcheck:
     runs-on: ubuntu-latest

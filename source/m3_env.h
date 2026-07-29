@@ -9,8 +9,7 @@
 #define m3_env_h
 
 #include "wasm3.h"
-#include "m3_code.h"
-#include "m3_compile.h"
+#include "m3_function.h"
 
 d_m3BeginExternC
 
@@ -118,6 +117,7 @@ typedef struct M3Module
     M3ImportInfo            memoryImport;
     bool                    memoryImported;
     const char*             memoryExportName;
+    bool                    directValidated;
 
     //bool                    hasWasmCodeCopy;
 
@@ -145,7 +145,6 @@ typedef struct M3Environment
 
     IM3FuncType             retFuncTypes [c_m3Type_unknown];    // these 'point' to elements in the linked list above.
                                                                 // the number of elements must match the basic types as per M3ValueType
-    M3CodePage *            pagesReleased;
 
     M3SectionHandler        customSectionHandler;
 }
@@ -159,30 +158,15 @@ void                        Environment_AddFuncType     (IM3Environment i_enviro
 //---------------------------------------------------------------------------------------------------------------------------------
 
 
-typedef struct M3ContinuationFrame
-{
-    pc_t                    pc;
-    m3stack_t               sp;
-    M3MemoryHeader *        mem;
-    m3reg_t                 r0;
-    bool                    allowInternalControlFlow;
-# if d_m3HasFloat
-    f64                     fp0;
-# endif
-}
-M3ContinuationFrame;
+
+struct M3DirectFrame;
+struct M3DirectControl;
 
 typedef struct M3Runtime
 {
-    M3Compilation           compilation;
 
     IM3Environment          environment;
 
-    M3CodePage *            pagesOpen;      // linked list of code pages with writable space on them
-    M3CodePage *            pagesFull;      // linked list of at-capacity pages
-
-    u32                     numCodePages;
-    u32                     numActiveCodePages;
 
     IM3Module               modules;        // linked list of imported modules
 
@@ -196,18 +180,20 @@ typedef struct M3Runtime
     bool                    fuelEnabled;
     bool                    suspended;
     IM3Function             suspendedFunction;
-    M3ContinuationFrame *   continuationFrames; // ordered outer-to-inner; resume executes from the end
-    u32                     numContinuationFrames;
-    u32                     maxContinuationFrames;
+    struct M3DirectFrame *  directFrames;
+    u32                     numDirectFrames;
+    u32                     maxDirectFrames;
+    struct M3DirectControl *directControls;
+    u32                     numDirectControls;
+    u32                     maxDirectControls;
+    u32                     directValueTop;
+    bool                    directActive;
+    IM3Function             directEntry;
 
     void *                  userdata;
 
     M3Memory                memory;
     u32                     memoryLimit;
-
-#if d_m3EnableStrace >= 2
-    u32                     callDepth;
-#endif
 
     M3ErrorInfo             error;
 #if d_m3VerboseErrorMessages
@@ -218,11 +204,9 @@ typedef struct M3Runtime
     M3BacktraceInfo         backtrace;
 #endif
 
-	u32						newCodePageSequence;
 }
 M3Runtime;
 
-void                        InitRuntime                 (IM3Runtime io_runtime, u32 i_stackSizeInBytes);
 void                        Runtime_Release             (IM3Runtime io_runtime);
 
 M3Result                    ResizeMemory                (IM3Runtime io_runtime, u32 i_numPages);
@@ -232,9 +216,6 @@ void *                      ForEachModule               (IM3Runtime i_runtime, M
 
 void *                      v_FindFunction              (IM3Module i_module, const char * const i_name);
 
-IM3CodePage                 AcquireCodePage             (IM3Runtime io_runtime);
-IM3CodePage                 AcquireCodePageWithCapacity (IM3Runtime io_runtime, u32 i_lineCount);
-void                        ReleaseCodePage             (IM3Runtime io_runtime, IM3CodePage i_codePage);
 
 d_m3EndExternC
 

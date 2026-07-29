@@ -206,7 +206,7 @@ M3Result NormalizeType (u8 * o_type, i8 i_convolutedWasmType)
     // Accept v128 (wasm-encoded as 0x7b → -i_convolutedWasmType == 5)
     // as an opaque slot so modules with v128 in signatures or local
     // declarations parse. Actual v128 opcodes still hit
-    // m3Err_unknownOpcode at compile time — we just stop refusing
+    // m3Err_unknownOpcode when execution reaches it — we just stop refusing
     // unused SIMD slots that auto-vectorization emits.
     else if (type < c_m3Type_i32 or type > c_m3Type_v128)
         result = m3Err_invalidTypeId;
@@ -330,33 +330,6 @@ M3Result  Read_u8  (u8 * o_value, bytes_t  * io_bytes, cbytes_t i_end)
     }
     else return m3Err_wasmUnderrun;
 }
-
-M3Result  Read_opcode  (m3opcode_t * o_value, bytes_t  * io_bytes, cbytes_t i_end)
-{
-    const u8 * ptr = * io_bytes;
-
-    if (ptr < i_end)
-    {
-        m3opcode_t opcode = * ptr++;
-
-#if d_m3CascadedOpcodes == 0
-        if (M3_UNLIKELY(opcode == c_waOp_extended))
-        {
-            if (ptr < i_end)
-            {
-                opcode = (opcode << 8) | (* ptr++);
-            }
-            else return m3Err_wasmUnderrun;
-        }
-#endif
-        * o_value = opcode;
-        * io_bytes = ptr;
-
-        return m3Err_none;
-    }
-    else return m3Err_wasmUnderrun;
-}
-
 
 M3Result  ReadLebUnsigned  (u64 * o_value, u32 i_maxNumBits, bytes_t * io_bytes, cbytes_t i_end)
 {
@@ -523,50 +496,20 @@ M3Result  Read_utf8  (cstr_t * o_utf8, bytes_t * io_bytes, cbytes_t i_end)
 }
 
 #if d_m3RecordBacktraces
-u32  FindModuleOffset  (IM3Runtime i_runtime, pc_t i_pc)
+u32  FindModuleOffset  (IM3Runtime i_runtime, bytes_t i_pc)
 {
-    // walk the code pages
-    IM3CodePage curr = i_runtime->pagesOpen;
-    bool pageFound = false;
-
-    while (curr)
+    for (IM3Module module = i_runtime ? i_runtime->modules : NULL;
+         module;
+         module = module->next)
     {
-        if (ContainsPC (curr, i_pc))
-        {
-            pageFound = true;
-            break;
-        }
-        curr = curr->info.next;
+        if (i_pc >= module->wasmStart && i_pc < module->wasmEnd)
+            return (u32)(i_pc - module->wasmStart);
     }
-
-    if (!pageFound)
-    {
-        curr = i_runtime->pagesFull;
-        while (curr)
-        {
-            if (ContainsPC (curr, i_pc))
-            {
-                pageFound = true;
-                break;
-            }
-            curr = curr->info.next;
-        }
-    }
-
-    if (pageFound)
-    {
-        u32 result = 0;
-
-        bool pcFound = MapPCToOffset (curr, i_pc, & result);
-                                                                                d_m3Assert (pcFound);
-
-        return result;
-    }
-    else return 0;
+    return 0;
 }
 
 
-void  PushBacktraceFrame  (IM3Runtime io_runtime, pc_t i_pc)
+void  PushBacktraceFrame  (IM3Runtime io_runtime, bytes_t i_pc)
 {
     // don't try to push any more frames if we've already had an alloc failure
     if (M3_UNLIKELY (io_runtime->backtrace.lastFrame == M3_BACKTRACE_TRUNCATED))
