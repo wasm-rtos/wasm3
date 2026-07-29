@@ -45,10 +45,12 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake ${{ matrix.config.flags }} ..
+        cmake -DBUILD_FUEL_TEST=ON ${{ matrix.config.flags }} ..
     - name: Build
       run: |
         cmake --build build
+    - name: Test fuel and resume
+      run: ctest --test-dir build --output-on-failure -R wasm3-fuel
     - name: Test WebAssembly spec
       run: cd test && python3 run-spec-test.py
     - name: Test previous WebAssembly specs

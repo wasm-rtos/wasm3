@@ -59,19 +59,15 @@ d_m3BeginExternC
 #    define jumpOpImpl(PC)          ((IM3Operation)(*  PC))(_runtime, PC + 1, d_m3OpArgs)
 # endif
 
-m3ret_t  FuelCheckAndSave  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0
-# if d_m3HasFloat
-    , f64 fp0
-# endif
-);
-
-# if d_m3HasFloat
-#   define FuelCheck(PC)            FuelCheckAndSave (_runtime, (pc_t)(PC), _sp, _mem, _r0, _fp0)
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+m3ret_t vectorcall FuelDispatch (d_m3OpSig, cstr_t i_operationName);
+#   define nextOpDirect()            M3_MUSTTAIL return FuelDispatch (d_m3OpAllArgs, __FUNCTION__)
+#   define jumpOpDirect(PC)          do { pc_t _jumpPC = (pc_t)(PC); M3_MUSTTAIL return FuelDispatch (_runtime, _jumpPC, d_m3OpArgs, __FUNCTION__); } while (0)
 # else
-#   define FuelCheck(PC)            FuelCheckAndSave (_runtime, (pc_t)(PC), _sp, _mem, _r0)
+m3ret_t vectorcall FuelDispatch (d_m3OpSig);
+#   define nextOpDirect()            M3_MUSTTAIL return FuelDispatch (d_m3OpAllArgs)
+#   define jumpOpDirect(PC)          do { pc_t _jumpPC = (pc_t)(PC); M3_MUSTTAIL return FuelDispatch (_runtime, _jumpPC, d_m3OpArgs); } while (0)
 # endif
-#define nextOpDirect()              do { m3ret_t _fuelTrap = FuelCheck (_pc); if (M3_UNLIKELY(_fuelTrap)) return _fuelTrap; M3_MUSTTAIL return nextOpImpl(); } while (0)
-#define jumpOpDirect(PC)            do { pc_t _jumpPC = (pc_t)(PC); m3ret_t _fuelTrap = FuelCheck (_jumpPC); if (M3_UNLIKELY(_fuelTrap)) return _fuelTrap; M3_MUSTTAIL return jumpOpImpl(_jumpPC); } while (0)
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
 d_m3RetSig  RunCode  (d_m3OpSig, cstr_t i_operationName)

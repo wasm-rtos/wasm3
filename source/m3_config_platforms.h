@@ -66,7 +66,7 @@
 # if defined(M3_COMPILER_MSVC)
 #  define M3_WEAK //__declspec(selectany)
 #  define M3_NO_UBSAN
-#  define M3_NOINLINE
+#  define M3_NOINLINE   __declspec(noinline)
 # elif defined(__MINGW32__) || defined(__CYGWIN__)
 #  define M3_WEAK //__attribute__((selectany))
 #  define M3_NO_UBSAN

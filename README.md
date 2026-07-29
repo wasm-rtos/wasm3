@@ -65,6 +65,10 @@ Fuel is runtime-local.
 
 When fuel is enabled, wasm3 decreases the runtime fuel while executing WebAssembly code. When fuel reaches zero, execution stops and returns `m3Err_fuelExhausted`.
 
+Fuel accounting runs in one shared metacode dispatcher instead of being
+inlined into every operation handler. This keeps the compiled interpreter
+smaller without changing fuel, suspension, or resume semantics.
+
 If wasm3 can capture the current continuation, the runtime becomes suspended and can later be resumed with `m3_Resume()`.
 
 Use `m3_SetFuel()` to set a new fuel value.
