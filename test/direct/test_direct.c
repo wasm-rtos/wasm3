@@ -33,16 +33,17 @@ static const unsigned char startModule[] = {
     0x00, 0x41, 0x00, 0x0b, 0x01, 0x41
 };
 
-// An exported function that calls env.host() -> i32 and then returns.
+// An exported function that forwards one i32 through env.host(i32) -> i32.
 static const unsigned char importModule[] = {
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
     0x02, 0x0c, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x04,
     0x68, 0x6f, 0x73, 0x74, 0x00, 0x00,
     0x03, 0x02, 0x01, 0x00,
     0x07, 0x0d, 0x01, 0x09, 0x63, 0x61, 0x6c, 0x6c,
     0x5f, 0x68, 0x6f, 0x73, 0x74, 0x00, 0x01,
-    0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b
+    0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10,
+    0x00, 0x0b
 };
 
 #define CHECK(CONDITION, MESSAGE)                                      \
@@ -54,15 +55,15 @@ static const unsigned char importModule[] = {
 
 static int hostCalls;
 
-static const void * HostValue (IM3Runtime runtime, IM3ImportContext context,
-                               uint64_t * stack, void * memory)
+m3ApiRawFunction (HostValue)
 {
-    (void)runtime;
-    (void)context;
-    (void)memory;
+    m3ApiReturnType (int32_t);
+    m3ApiGetArg (int32_t, input);
+    (void) runtime;
+    (void) _ctx;
+    (void) _mem;
     ++hostCalls;
-    *(int32_t *)stack = 42;
-    return m3Err_none;
+    m3ApiReturn (input + 1);
 }
 
 static int InitializeModule (TestVm * vm, uint32_t size)
@@ -133,7 +134,7 @@ static int LoadImportVm (TestVm * vm)
     memcpy (vm->wasm, importModule, sizeof importModule);
     if (!InitializeModule (vm, sizeof importModule))
         return 0;
-    if (m3_LinkRawFunction (vm->module, "env", "host", "i()", HostValue) !=
+    if (m3_LinkRawFunction (vm->module, "env", "host", "i(i)", HostValue) !=
         m3Err_none)
         return 0;
     return m3_FindFunction (& vm->function, vm->runtime, "call_host") == m3Err_none;
@@ -173,6 +174,10 @@ int main (int argc, char ** argv)
     TestVm stepVm;
     CHECK (LoadVm (& stepVm, argv[1], "fib"), "load step VM");
     CHECK (StartFib (& stepVm) == m3Err_none, "start without executing");
+    CHECK (m3_GetRuntimeMemoryUsage (stepVm.runtime) > 64 * 1024,
+           "runtime memory usage includes execution state");
+    CHECK (m3_GetRuntimeMemoryUsage (NULL) == 0,
+           "null runtime has zero memory usage");
 
     uint64_t instructionCount = 0;
     int everyStepSuspended = 1;
@@ -283,8 +288,13 @@ int main (int argc, char ** argv)
     if (importReady)
     {
         hostCalls = 0;
-        CHECK (m3_Start (importVm.function, 0, NULL) == m3Err_none,
+        int32_t importInput = 41;
+        const void * importArguments[] = { &importInput };
+        CHECK (m3_Start (importVm.function, 1, importArguments) == m3Err_none,
                "start raw-import caller");
+        result = m3_Execute (importVm.runtime, 1, & consumed);
+        CHECK (result == m3Err_fuelExhausted, "local.get costs one fuel");
+        CHECK (hostCalls == 0, "raw import is not called before call instruction");
         result = m3_Execute (importVm.runtime, 1, & consumed);
         CHECK (result == m3Err_fuelExhausted, "raw import call costs one fuel");
         CHECK (consumed == 1, "raw import call consumes exactly one instruction");

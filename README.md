@@ -2,7 +2,7 @@
 
 This [`wasm3`](https://github.com/wasm3/wasm3) fork is the WebAssembly engine used by `wasm-rtos`.
 
-The default backend executes the original WebAssembly bytecode directly. It does not translate functions to wasm3 metacode and does not allocate metacode pages. The program counter always points into the module's persistent `.wasm` bytes.
+The engine executes original WebAssembly bytecode directly. It does not translate functions into an intermediate instruction stream. The program counter always points into the module's persistent `.wasm` bytes.
 
 Floating-point instructions, raw host imports, simple WASI, fuel-based suspension, resume, and runtime snapshots remain supported.
 
@@ -70,13 +70,13 @@ The interpreter stores resumable state explicitly:
 - structured-control frames for blocks, loops, conditionals, and branches;
 - runtime-local fuel and suspension state.
 
-Call and control frame arrays grow only as needed. The large legacy compiler state is not part of `M3Runtime` in the default configuration.
+Call and control frame arrays grow only as needed. There is no compiler state or executable-code page allocator in `M3Runtime`.
 
 The byte buffer passed to `m3_ParseModule()` must remain valid for the module lifetime. On a target with memory-mapped flash or ROM, that buffer can reside there and be executed directly. A block device such as an SD card is not directly addressable, so using it as executable backing storage still requires a host-side cache or paging layer.
 
 ## Raw imports and WASI
 
-`m3_LinkRawFunction()` and `m3_LinkRawFunctionEx()` bind imports without generating wrapper metacode. Imported functions are checked lazily when a reachable function is entered, matching wasm3's existing lazy-link behavior.
+`m3_LinkRawFunction()` and `m3_LinkRawFunctionEx()` bind imports directly. Imported functions are checked lazily when a reachable function is entered.
 
 Simple WASI and floating-point execution are enabled through the same build options as before.
 
@@ -104,7 +104,7 @@ M3Result m3_LoadRuntimeSnapshot(
 );
 ```
 
-Snapshot v2 stores bytecode offsets instead of metacode addresses. Restoring therefore does not compile any functions. It includes:
+Snapshot v2 stores bytecode offsets. Restoring does not translate or compile any functions. It includes:
 
 - value-stack contents;
 - call and control frames;
@@ -114,15 +114,15 @@ Snapshot v2 stores bytecode offsets instead of metacode addresses. Restoring the
 
 The format is process-local and intended for controlled task swapping. It is not a reboot-safe, cross-version, cross-platform, or long-term persistence format. Restore into a fresh runtime created from the same module bytes and layout, and relink the same host imports before loading the snapshot. Host-side resources and state are not serialized.
 
-## Backend selection
+## Execution model
 
-Direct execution is the default:
+Direct bytecode execution is the only backend. The former metacode compiler,
+operation dispatcher, code-page allocator, and backend-selection flags have
+been removed from this fork.
 
-```c
-#define d_m3UseDirectExecutor 1
-```
-
-Setting `d_m3UseDirectExecutor=0` at compile time restores the legacy metacode backend for differential testing. The two backends are compiled exclusively, so the unused backend does not occupy the default binary or runtime structure.
+`m3_GetRuntimeMemoryUsage()` reports the runtime object, value stack, linear
+memory, and direct frame/control buffers. Hosts that enforce resident-memory
+budgets can use it without depending on private code-page structures.
 
 ## Verification
 

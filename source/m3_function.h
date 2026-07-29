@@ -26,6 +26,8 @@ M3FuncType;
 
 typedef M3FuncType *        IM3FuncType;
 
+#define d_FuncRetType(ftype, i) ((ftype)->types[(i)])
+#define d_FuncArgType(ftype, i) ((ftype)->types[(ftype)->numRets + (i)])
 
 M3Result    AllocFuncType                   (IM3FuncType * o_functionType, u32 i_numTypes);
 bool        AreFuncTypesEqual               (const IM3FuncType i_typeA, const IM3FuncType i_typeB);
@@ -53,23 +55,9 @@ typedef struct M3Function
 
     IM3FuncType             funcType;
 
-#if d_m3UseDirectExecutor
     M3RawCall               rawFunction;
     voidptr_t               rawUserdata;
     bool                    directLinked;
-#else
-    pc_t                    compiled;
-
-# if (d_m3EnableCodePageRefCounting)
-    IM3CodePage *           codePageRefs;                           // array of all pages used
-    u32                     numCodePageRefs;
-# endif
-
-    u16                     maxStackSlots;
-
-    u16                     numRetSlots;
-    u16                     numRetAndArgSlots;
-#endif
 
 #if defined (DEBUG)
     u32                     hits;
@@ -77,21 +65,13 @@ typedef struct M3Function
 #endif
 
     u16                     numLocals;                              // not including args
-#if !d_m3UseDirectExecutor
-    u16                     numLocalBytes;
-#endif
 
     bool                    ownsWasmCode;
 
-#if !d_m3UseDirectExecutor
-    u16                     numConstantBytes;
-    void *                  constants;
-#endif
 }
 M3Function;
 
 void        Function_Release            (IM3Function i_function);
-void        Function_FreeCompiledCode   (IM3Function i_function);
 
 cstr_t      GetFunctionImportModuleName (IM3Function i_function);
 cstr_t *    GetFunctionNames            (IM3Function i_function, u16 * o_numNames);
@@ -102,8 +82,6 @@ u16         GetFunctionNumReturns       (IM3Function i_function);
 u8          GetFunctionReturnType       (const IM3Function i_function, u16 i_index);
 
 u32         GetFunctionNumArgsAndLocals (IM3Function i_function);
-
-cstr_t      SPrintFunctionArgList       (IM3Function i_function, m3stack_t i_sp);
 
 //---------------------------------------------------------------------------------------------------------------------------------
 

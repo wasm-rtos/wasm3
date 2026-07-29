@@ -99,9 +99,8 @@ This can be useful for cross-compilation, quick builds or when a build system (C
 gcc -O3 -g0 -s -Isource -Dd_m3HasWASI source/*.c platforms/app/main.c -lm -o wasm3
 ```
 
-This builds the direct bytecode executor by default. Add
-`-Dd_m3UseDirectExecutor=0` only when building the legacy metacode backend for
-differential testing.
+This builds the direct bytecode executor. There is no generated intermediate
+instruction stream or alternative execution backend.
 
 ### msvc/clang-cl
 ```sh

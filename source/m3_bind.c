@@ -146,14 +146,10 @@ _try {
                 if (i_signature) {
 _                   (ValidateSignature (f, i_signature));
                 }
-#if d_m3UseDirectExecutor
                 f->rawFunction = i_function;
                 f->rawUserdata = i_userdata;
                 f->module = io_module;
                 result = m3Err_none;
-#else
-_               (CompileRawFunction (io_module, f, (const void *)i_function, i_userdata));
-#endif
             }
         }
     }

@@ -203,16 +203,10 @@ elseif(BUILD_WASI MATCHES "uvwasi")
   set(INSTALL_UVWASI OFF CACHE BOOL "" FORCE)
 
   FetchContent_Declare(
-    libuv
-    GIT_REPOSITORY https://github.com/libuv/libuv.git
-    GIT_TAG        v1.52.1
-  )
-  FetchContent_Declare(
     uvwasi
-    GIT_REPOSITORY  https://github.com/vshymanskyy/uvwasi.git
-    GIT_TAG         master
+    GIT_REPOSITORY  https://github.com/nodejs/uvwasi.git
+    GIT_TAG         0820128569533c855d60c0f6382acbb14aa62ad2
   )
-  FetchContent_MakeAvailable(libuv)
   FetchContent_MakeAvailable(uvwasi)
   include_directories("${uvwasi_SOURCE_DIR}/include")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Dd_m3HasUVWASI")

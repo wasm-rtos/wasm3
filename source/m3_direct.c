@@ -2,17 +2,16 @@
 //  m3_direct.c
 //
 //  A small, resumable interpreter for the original WebAssembly bytecode.
-//  Unlike the legacy wasm3 backend, this executor never creates metacode
-//  pages. Its program counter always points into the module's .wasm bytes.
+//  It executes original WebAssembly instructions without creating an
+//  intermediate instruction stream. The program counter always points into
+//  the module's persistent .wasm bytes.
 //
 
 #include "m3_config.h"
 
-#if d_m3UseDirectExecutor
 
 #include "m3_direct.h"
 #include "m3_math_utils.h"
-#include "m3_exec_defs.h"
 
 #include <limits.h>
 #include <math.h>
@@ -667,9 +666,8 @@ M3Result DirectValidateFunctionGraph (IM3Function function)
         return m3Err_none;
     }
 
-    // Match wasm3's lazy compiler: validate imports directly referenced by
-    // this function, but do not recursively validate callees until they are
-    // actually entered.
+    // Validate imports referenced directly by this function. Callees are
+    // validated lazily when execution first reaches them.
     bytes_t pc;
     u32 numLocals;
     result = DirectParseFunctionBody (function, & pc, & numLocals);
@@ -828,6 +826,22 @@ void DirectRelease (IM3Runtime runtime)
     runtime->maxDirectFrames = 0;
     runtime->maxDirectControls = 0;
     DirectReset (runtime);
+}
+
+uint64_t m3_GetRuntimeMemoryUsage (IM3Runtime runtime)
+{
+    if (not runtime)
+        return 0;
+
+    uint64_t size = sizeof (M3Runtime);
+    size += (uint64_t) runtime->stackSize + 4u * sizeof (m3slot_t);
+    size += (uint64_t) runtime->maxDirectFrames * sizeof (M3DirectFrame);
+    size += (uint64_t) runtime->maxDirectControls * sizeof (M3DirectControl);
+
+    if (runtime->memory.mallocated)
+        size += sizeof (M3MemoryHeader) + runtime->memory.mallocated->length;
+
+    return size;
 }
 
 M3Result DirectStart (IM3Function function)
@@ -1024,6 +1038,22 @@ static M3Result DirectCallRaw (IM3Runtime runtime, IM3Function function)
     memmove (values + base + numRets, values + base, numArgs * sizeof (u64));
     memset (values + base, 0, numRets * sizeof (u64));
 
+    // The public raw-call ABI stores each value in an eight-byte slot, but
+    // 32-bit C values occupy the first four bytes of that slot. Convert the
+    // native integer representation used by the interpreter before crossing
+    // that boundary. This is a no-op in practice on little-endian targets and
+    // is required on big-endian targets.
+    for (u32 i = 0; i < numArgs; ++i)
+    {
+        u8 type = d_FuncArgType (function->funcType, i);
+        if (type == c_m3Type_i32 || type == c_m3Type_f32)
+        {
+            u32 word = (u32) values[base + numRets + i];
+            values[base + numRets + i] = 0;
+            memcpy (&values[base + numRets + i], &word, sizeof word);
+        }
+    }
+
     M3ImportContext context;
     context.function = function;
     context.userdata = (void *) function->rawUserdata;
@@ -1031,6 +1061,19 @@ static M3Result DirectCallRaw (IM3Runtime runtime, IM3Function function)
     M3RawCall call = function->rawFunction;
     void * memory = runtime->memory.mallocated ? m3MemData (runtime->memory.mallocated) : NULL;
     M3Result result = (M3Result) call (runtime, & context, values + base, memory);
+    if (not result)
+    {
+        for (u32 i = 0; i < numRets; ++i)
+        {
+            u8 type = d_FuncRetType (function->funcType, i);
+            if (type == c_m3Type_i32 || type == c_m3Type_f32)
+            {
+                u32 word;
+                memcpy (&word, &values[base + i], sizeof word);
+                values[base + i] = word;
+            }
+        }
+    }
     runtime->directValueTop = base + numRets;
     return result;
 }
@@ -1102,36 +1145,21 @@ static M3Result DirectLoadBits (IM3Runtime runtime, M3DirectFrame * frame,
     if (result)
         return result;
 
-    u64 address;
+    u64 address = 0;
     result = DirectPop (runtime, & address);
     if (result)
         return result;
     address = (u32) address;
     address += offset;
 
-    u8 * source;
+    u8 * source = NULL;
     result = DirectMemoryBounds (runtime, address, byteCount, & source);
     if (result)
         return result;
 
     u64 value = 0;
-    memcpy (& value, source, byteCount);
-    if (byteCount == 2)
-    {
-        u16 v = (u16) value;
-        M3_BSWAP_u16 (v);
-        value = v;
-    }
-    else if (byteCount == 4)
-    {
-        u32 v = (u32) value;
-        M3_BSWAP_u32 (v);
-        value = v;
-    }
-    else if (byteCount == 8)
-    {
-        M3_BSWAP_u64 (value);
-    }
+    for (u32 i = 0; i < byteCount; ++i)
+        value |= (u64) source[i] << (i * 8);
 
     if (signExtend && byteCount < 8)
     {
@@ -1150,8 +1178,8 @@ static M3Result DirectStoreBits (IM3Runtime runtime, M3DirectFrame * frame, u32 
     if (result)
         return result;
 
-    u64 value;
-    u64 address;
+    u64 value = 0;
+    u64 address = 0;
     result = DirectPop (runtime, & value);
     if (result)
         return result;
@@ -1161,32 +1189,13 @@ static M3Result DirectStoreBits (IM3Runtime runtime, M3DirectFrame * frame, u32 
     address = (u32) address;
     address += offset;
 
-    u8 * destination;
+    u8 * destination = NULL;
     result = DirectMemoryBounds (runtime, address, byteCount, & destination);
     if (result)
         return result;
 
-    if (byteCount == 2)
-    {
-        u16 v = (u16) value;
-        M3_BSWAP_u16 (v);
-        memcpy (destination, & v, sizeof v);
-    }
-    else if (byteCount == 4)
-    {
-        u32 v = (u32) value;
-        M3_BSWAP_u32 (v);
-        memcpy (destination, & v, sizeof v);
-    }
-    else if (byteCount == 8)
-    {
-        M3_BSWAP_u64 (value);
-        memcpy (destination, & value, sizeof value);
-    }
-    else
-    {
-        *destination = (u8) value;
-    }
+    for (u32 i = 0; i < byteCount; ++i)
+        destination[i] = (u8) (value >> (i * 8));
     return m3Err_none;
 }
 
@@ -1387,7 +1396,7 @@ static M3Result DirectPop2 (IM3Runtime runtime, u64 * a, u64 * b)
 
 static M3Result DirectInteger32 (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 av, bv = 0;
+    u64 av = 0, bv = 0;
     M3Result result;
 
     if (opcode >= 0x67 && opcode <= 0x69)
@@ -1450,7 +1459,7 @@ static M3Result DirectInteger32 (IM3Runtime runtime, m3opcode_t opcode)
 
 static M3Result DirectInteger64 (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 a, b = 0;
+    u64 a = 0, b = 0;
     M3Result result;
 
     if (opcode >= 0x79 && opcode <= 0x7b)
@@ -1510,7 +1519,7 @@ static M3Result DirectInteger64 (IM3Runtime runtime, m3opcode_t opcode)
 
 static M3Result DirectCompare (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 a, b;
+    u64 a = 0, b = 0;
     M3Result result;
 
     if (opcode == 0x45 || opcode == 0x50)
@@ -1574,7 +1583,7 @@ static M3Result DirectCompare (IM3Runtime runtime, m3opcode_t opcode)
 #if d_m3HasFloat
 static M3Result DirectFloat32 (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 bitsA, bitsB;
+    u64 bitsA = 0, bitsB = 0;
     M3Result result = DirectPop (runtime, & bitsA);
     if (result)
         return result;
@@ -1618,7 +1627,7 @@ static M3Result DirectFloat32 (IM3Runtime runtime, m3opcode_t opcode)
 
 static M3Result DirectFloat64 (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 bitsA, bitsB;
+    u64 bitsA = 0, bitsB = 0;
     M3Result result = DirectPop (runtime, & bitsA);
     if (result)
         return result;
@@ -1710,7 +1719,7 @@ static M3Result DirectTruncate (long double value, bool sourceF32,
 
 static M3Result DirectConvert (IM3Runtime runtime, m3opcode_t opcode)
 {
-    u64 value;
+    u64 value = 0;
     M3Result result = DirectPop (runtime, & value);
     if (result)
         return result;
@@ -1773,7 +1782,7 @@ static M3Result DirectExtended (IM3Runtime runtime, M3DirectFrame * frame, m3opc
     if (opcode >= 0xfc00 && opcode <= 0xfc07)
     {
 #if d_m3HasFloat
-        u64 input;
+        u64 input = 0;
         M3Result result = DirectPop (runtime, & input);
         if (result)
             return result;
@@ -1806,7 +1815,7 @@ static M3Result DirectExtended (IM3Runtime runtime, M3DirectFrame * frame, m3opc
         if (sourceMemory != 0 || targetMemory != 0)
             return m3Err_wasmMalformed;
 
-        u64 sizeValue, sourceValue, destinationValue;
+        u64 sizeValue = 0, sourceValue = 0, destinationValue = 0;
         result = DirectPop (runtime, & sizeValue);
         if (result) return result;
         result = DirectPop (runtime, & sourceValue);
@@ -1817,8 +1826,8 @@ static M3Result DirectExtended (IM3Runtime runtime, M3DirectFrame * frame, m3opc
         u32 size = (u32) sizeValue;
         u64 source = (u32) sourceValue;
         u64 destination = (u32) destinationValue;
-        u8 * sourcePtr;
-        u8 * destinationPtr;
+        u8 * sourcePtr = NULL;
+        u8 * destinationPtr = NULL;
         result = DirectMemoryBounds (runtime, source, size, & sourcePtr);
         if (result) return result;
         result = DirectMemoryBounds (runtime, destination, size, & destinationPtr);
@@ -1836,7 +1845,7 @@ static M3Result DirectExtended (IM3Runtime runtime, M3DirectFrame * frame, m3opc
         if (memoryIndex != 0)
             return m3Err_wasmMalformed;
 
-        u64 sizeValue, byteValue, destinationValue;
+        u64 sizeValue = 0, byteValue = 0, destinationValue = 0;
         result = DirectPop (runtime, & sizeValue);
         if (result) return result;
         result = DirectPop (runtime, & byteValue);
@@ -1846,7 +1855,7 @@ static M3Result DirectExtended (IM3Runtime runtime, M3DirectFrame * frame, m3opc
 
         u32 size = (u32) sizeValue;
         u64 destination = (u32) destinationValue;
-        u8 * destinationPtr;
+        u8 * destinationPtr = NULL;
         result = DirectMemoryBounds (runtime, destination, size, & destinationPtr);
         if (result) return result;
         memset (destinationPtr, (u8) byteValue, size);
@@ -2007,12 +2016,12 @@ static M3Result DirectExecuteInstruction (IM3Runtime runtime)
 
     case 0x1a:
     {
-        u64 ignored;
+        u64 ignored = 0;
         return DirectPop (runtime, & ignored);
     }
     case 0x1b:
     {
-        u64 condition, second, first;
+        u64 condition = 0, second = 0, first = 0;
         result = DirectPop (runtime, & condition);
         if (result) return result;
         result = DirectPop (runtime, & second);
@@ -2040,7 +2049,7 @@ static M3Result DirectExecuteInstruction (IM3Runtime runtime)
         if (opcode == c_waOp_getLocal)
             return DirectPush (runtime, DirectValues (runtime)[slot]);
 
-        u64 value;
+        u64 value = 0;
         result = opcode == c_waOp_teeLocal ? DirectPeek (runtime, & value)
                                            : DirectPop (runtime, & value);
         if (result)
@@ -2062,12 +2071,12 @@ static M3Result DirectExecuteInstruction (IM3Runtime runtime)
 
         if (opcode == c_waOp_getGlobal)
         {
-            u64 value;
+            u64 value = 0;
             result = DirectGetGlobalValue (& module->globals[index], & value);
             return result ? result : DirectPush (runtime, value);
         }
 
-        u64 value;
+        u64 value = 0;
         result = DirectPop (runtime, & value);
         return result ? result : DirectSetGlobalValue (& module->globals[index], value);
     }
@@ -2111,7 +2120,7 @@ static M3Result DirectExecuteInstruction (IM3Runtime runtime)
         result = ReadLEB_u32 (& memoryIndex, & frame->pc, frame->end);
         if (result) return result;
         if (memoryIndex != 0) return m3Err_wasmMalformed;
-        u64 pagesValue;
+        u64 pagesValue = 0;
         result = DirectPop (runtime, & pagesValue);
         if (result) return result;
         i32 pages = (i32)(u32)pagesValue;
@@ -2241,9 +2250,8 @@ M3Result DirectRun (IM3Runtime runtime)
     return m3Err_none;
 }
 
-// Snapshot v2 stores only byte offsets and explicit interpreter state. It is
-// process-local like the previous format, but no longer depends on metacode
-// addresses or deterministic recompilation.
+// Snapshot v2 stores only byte offsets and explicit interpreter state. The
+// format is process-local and does not contain native code addresses.
 #define M3_DIRECT_SNAPSHOT_MAGIC   0x3253444du /* MDS2 */
 #define M3_DIRECT_SNAPSHOT_VERSION 2u
 #define M3_DIRECT_SNAPSHOT_NO_PC   UINT32_MAX
@@ -2635,5 +2643,3 @@ M3Result DirectLoadSnapshot (IM3Runtime runtime, const u8 * buffer, u32 bufferSi
     runtime->lastCalled = NULL;
     return m3Err_none;
 }
-
-#endif // d_m3UseDirectExecutor
