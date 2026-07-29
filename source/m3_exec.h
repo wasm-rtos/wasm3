@@ -156,8 +156,8 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 #define jumpOp(PC)                  jumpOpDirect(PC)
 
 #if d_m3RecordBacktraces
-    #define pushBacktraceFrame()            (PushBacktraceFrame (_mem->runtime, _pc - 1))
-    #define fillBacktraceFrame(FUNCTION)    (FillBacktraceFunctionInfo (_mem->runtime, function))
+    #define pushBacktraceFrame()            (PushBacktraceFrame (_runtime, _pc - 1))
+    #define fillBacktraceFrame(FUNCTION)    (FillBacktraceFunctionInfo (_runtime, function))
 
     #define newTrap(err)                    return (pushBacktraceFrame (), err)
     #define forwardTrap(err)                return err
@@ -176,7 +176,7 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
     #define d_m3TracePrint(fmt, ...)            fprintf(stderr, fmt "\n", ##__VA_ARGS__)
 #elif d_m3EnableStrace >= 2
     // Structured trace
-    #define d_m3TracePrepare                    const IM3Runtime trace_rt = m3MemRuntime(_mem);
+    #define d_m3TracePrepare                    const IM3Runtime trace_rt = _runtime;
     #define d_m3TracePrint(fmt, ...)            fprintf(stderr, "%*s" fmt "\n", (trace_rt->callDepth)*2, "", ##__VA_ARGS__)
 #else
     #define d_m3TracePrepare
@@ -193,11 +193,11 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 
 #ifdef DEBUG
   #define d_outOfBounds newTrap (ErrorRuntime (m3Err_trapOutOfBoundsMemoryAccess,   \
-                        _mem->runtime, "memory size: %zu; access offset: %zu",      \
+                        _runtime, "memory size: %zu; access offset: %zu",           \
                         _mem->length, operand))
 
 #   define d_outOfBoundsMemOp(OFFSET, SIZE) newTrap (ErrorRuntime (m3Err_trapOutOfBoundsMemoryAccess,   \
-                      _mem->runtime, "memory size: %zu; access offset: %zu; size: %u",     \
+                      _runtime, "memory size: %zu; access offset: %zu; size: %u",          \
                       _mem->length, OFFSET, SIZE))
 #else
   #define d_outOfBounds newTrap (m3Err_trapOutOfBoundsMemoryAccess)
@@ -641,7 +641,7 @@ d_m3Op  (Call)
 {
     pc_t callPC                 = immediate (pc_t);
     i32 stackOffset             = immediate (i32);
-    IM3Memory memory            = m3MemInfo (_mem);
+    IM3Memory memory            = _runtime->memory;
 
     m3stack_t sp = _sp + stackOffset;
     u32 frameDepth = _runtime->numContinuationFrames;
@@ -681,7 +681,7 @@ d_m3Op  (CallIndirect)
     IM3Module module            = immediate (IM3Module);
     IM3FuncType type            = immediate (IM3FuncType);
     i32 stackOffset             = immediate (i32);
-    IM3Memory memory            = m3MemInfo (_mem);
+    IM3Memory memory            = _runtime->memory;
 
     m3stack_t sp = _sp + stackOffset;
     u32 frameDepth = _runtime->numContinuationFrames;
@@ -752,9 +752,9 @@ d_m3Op  (CallRawFunction)
     ctx.function = immediate (IM3Function);
     ctx.userdata = immediate (void *);
     u64* const sp = ((u64*)_sp);
-    IM3Memory memory = m3MemInfo (_mem);
+    IM3Memory memory = _runtime->memory;
 
-    IM3Runtime runtime = m3MemRuntime(_mem);
+    IM3Runtime runtime = _runtime;
 
 #if d_m3EnableStrace
     IM3FuncType ftype = ctx.function->funcType;
@@ -817,7 +817,7 @@ d_m3Op  (CallRawFunction)
 
 d_m3Op  (MemSize)
 {
-    IM3Memory memory            = m3MemInfo (_mem);
+    IM3Memory memory            = _runtime->memory;
 
     _r0 = memory->numPages;
 
@@ -827,8 +827,8 @@ d_m3Op  (MemSize)
 
 d_m3Op  (MemGrow)
 {
-    IM3Runtime runtime          = m3MemRuntime(_mem);
-    IM3Memory memory            = & runtime->memory;
+    IM3Runtime runtime          = _runtime;
+    IM3Memory memory            = runtime->memory;
 
     i32 numPagesToGrow = _r0;
     if (numPagesToGrow >= 0) {
@@ -928,12 +928,13 @@ d_m3Op  (Entry)
     d_m3TracePrepare
 
     IM3Function function = immediate (IM3Function);
-    IM3Memory memory = m3MemInfo (_mem);
+    IM3Memory memory = _runtime->memory;
 
 #if d_m3SkipStackCheck
     if (true)
 #else
-    if (M3_LIKELY ((void *) (_sp + function->maxStackSlots) < _mem->maxStack))
+    if (M3_LIKELY ((void *) (_sp + function->maxStackSlots) <
+                   (void *) ((m3slot_t *) _runtime->originStack + _runtime->numStackSlots)))
 #endif
     {
 #if defined(DEBUG)
@@ -994,7 +995,7 @@ d_m3Op  (Loop)
     m3ret_t r;
     u32 frameDepth = _runtime->numContinuationFrames;
 
-    IM3Memory memory = m3MemInfo (_mem);
+    IM3Memory memory = _runtime->memory;
 
     do
     {
