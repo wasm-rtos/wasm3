@@ -143,6 +143,7 @@ _try {
             if (strcmp (f->import.fieldUtf8, i_functionName) == 0 and
                (wildcardModule or strcmp (f->import.moduleUtf8, i_moduleName) == 0))
             {
+                _throwif (m3Err_functionAlreadyLinked, f->linkedFunction);
                 if (i_signature) {
 _                   (ValidateSignature (f, i_signature));
                 }
@@ -173,3 +174,86 @@ M3Result  m3_LinkRawFunction  (IM3Module            io_module,
     return FindAndLinkFunction (io_module, i_moduleName, i_functionName, i_signature, (voidptr_t)i_function, NULL);
 }
 
+
+static
+bool  IsFunctionImportMatch  (IM3Function       i_function,
+                              ccstr_t            i_moduleName,
+                              ccstr_t            i_functionName,
+                              bool               i_wildcardModule)
+{
+    return i_function->import.moduleUtf8 &&
+           i_function->import.fieldUtf8 &&
+           strcmp (i_function->import.fieldUtf8, i_functionName) == 0 &&
+           (i_wildcardModule ||
+            strcmp (i_function->import.moduleUtf8, i_moduleName) == 0);
+}
+
+
+M3Result  m3_LinkWasmFunction  (IM3Module            io_module,
+                                const char * const   i_moduleName,
+                                const char * const   i_functionName,
+                                IM3Function          i_exportedFunction)
+{
+    if (!io_module || !i_moduleName || !i_functionName ||
+        !i_exportedFunction)
+    {
+        return m3Err_functionLookupFailed;
+    }
+
+    if (!io_module->runtime || !i_exportedFunction->module ||
+        !i_exportedFunction->module->runtime)
+    {
+        return m3Err_moduleNotLinked;
+    }
+
+    if (io_module->runtime != i_exportedFunction->module->runtime)
+        return m3Err_functionRuntimeMismatch;
+
+    if (!i_exportedFunction->export_name || !i_exportedFunction->wasm)
+        return m3Err_functionLookupFailed;
+
+    const bool wildcardModule = strcmp (i_moduleName, "*") == 0;
+    bool found = false;
+
+    for (u32 i = 0; i < io_module->numFunctions; ++i)
+    {
+        IM3Function function = &io_module->functions[i];
+
+        if (!IsFunctionImportMatch (
+                function, i_moduleName, i_functionName, wildcardModule))
+        {
+            continue;
+        }
+
+        found = true;
+
+        if (!AreFuncTypesEqual (
+                function->funcType, i_exportedFunction->funcType))
+        {
+            return m3Err_functionTypeMismatch;
+        }
+
+        if (function->compiled ||
+            (function->linkedFunction &&
+             function->linkedFunction != i_exportedFunction))
+        {
+            return m3Err_functionAlreadyLinked;
+        }
+    }
+
+    if (!found)
+        return m3Err_functionLookupFailed;
+
+    for (u32 i = 0; i < io_module->numFunctions; ++i)
+    {
+        IM3Function function = &io_module->functions[i];
+
+        if (IsFunctionImportMatch (
+                function, i_moduleName, i_functionName, wildcardModule))
+        {
+            function->linkedFunction = i_exportedFunction;
+        }
+    }
+
+    return m3Err_none;
+}

@@ -133,6 +133,13 @@ void  Function_FreeCompiledCode (IM3Function i_function)
 #   endif
 }
 
+IM3Function  Function_Resolve  (IM3Function i_function)
+{
+    return i_function && i_function->linkedFunction
+         ? i_function->linkedFunction
+         : i_function;
+}
+
 
 cstr_t  m3_GetFunctionName  (IM3Function i_function)
 {
@@ -230,4 +237,3 @@ u32  GetFunctionNumArgsAndLocals (IM3Function i_function)
     else
         return 0;
 }
-
