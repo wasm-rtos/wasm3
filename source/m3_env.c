@@ -655,8 +655,7 @@ M3Result  m3_RunStart  (IM3Module io_module)
 
     if (io_module and io_module->startFunction >= 0)
     {
-        IM3Function function = Function_Resolve (
-            & io_module->functions [io_module->startFunction]);
+        IM3Function function = & io_module->functions [io_module->startFunction];
 
         if (not function->compiled)
         {
@@ -840,7 +839,6 @@ M3Result  m3_FindFunction  (IM3Function * o_function, IM3Runtime i_runtime, cons
     }
 
     function = (IM3Function) ForEachModule (i_runtime, (ModuleVisitor) v_FindFunction, (void *) i_functionName);
-    function = Function_Resolve (function);
 
     if (function)
     {
@@ -860,43 +858,6 @@ _           (CompileFunction (function))
     return result;
 }
 
-M3Result  m3_FindFunctionInModule  (IM3Function * o_function,
-                                    IM3Module i_module,
-                                    const char * const i_functionName)
-{
-    M3Result result = m3Err_none;
-    IM3Function function = NULL;
-
-    if (!o_function || !i_module || !i_functionName)
-        return m3Err_functionLookupFailed;
-
-    if (!i_module->runtime)
-        return m3Err_moduleNotLinked;
-
-    function = Function_Resolve (
-        (IM3Function) v_FindFunction (i_module, i_functionName));
-
-    if (function)
-    {
-        if (!function->compiled)
-        {
-_           (CompileFunction (function))
-        }
-    }
-    else
-    {
-        _throw (ErrorModule (
-            m3Err_functionLookupFailed, i_module, "'%s'", i_functionName));
-    }
-
-_catch:
-    if (result)
-        function = NULL;
-
-    *o_function = function;
-    return result;
-}
-
 
 M3Result  m3_GetTableFunction  (IM3Function * o_function, IM3Module i_module, uint32_t i_index)
 {
@@ -906,7 +867,7 @@ _try {
         _throw ("function index out of range");
     }
 
-    IM3Function function = Function_Resolve (i_module->table0[i_index]);
+    IM3Function function = i_module->table0[i_index];
 
     if (function)
     {

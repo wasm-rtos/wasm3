@@ -1683,8 +1683,7 @@ _try {
     u32 functionIndex;
 _   (ReadLEB_u32 (& functionIndex, & o->wasm, o->wasmEnd));
 
-    IM3Function function = Function_Resolve (
-        Module_GetFunction (o->module, functionIndex));
+    IM3Function function = Module_GetFunction (o->module, functionIndex);
 
     if (function)
     {                                                                   m3log (compile, d_indent " (func= [%d] '%s'; args= %d)",
