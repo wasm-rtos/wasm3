@@ -12,6 +12,9 @@
 #include "m3_compile.h"
 #include "m3_exception.h"
 #include "m3_info.h"
+#if d_m3HasM3C
+#include "m3_m3c_internal.h"
+#endif
 
 
 IM3Environment  m3_NewEnvironment  ()
@@ -539,7 +542,13 @@ M3Result  m3_CompileModule  (IM3Module io_module)
     for (u32 i = 0; i < io_module->numFunctions; ++i)
     {
         IM3Function f = & io_module->functions [i];
-        if (f->wasm and not f->compiled)
+        if (not f->compiled
+#if d_m3HasM3C
+            and (f->wasm or m3c_HasFunction (f))
+#else
+            and f->wasm
+#endif
+        )
         {
 _           (CompileFunction (f));
         }
@@ -610,6 +619,12 @@ _   (InitMemory (io_runtime, io_module));
 _   (InitGlobals (io_module));
 _   (InitDataSegments (memory, io_module));
 _   (InitElements (io_module));
+
+#if d_m3HasM3C
+    // Once initialization has consumed data/element/global expressions, an
+    // .m3c-backed module no longer needs its temporary source Wasm copy.
+    m3c_OnModuleLoaded (io_module);
+#endif
 
     // Start func might use imported functions, which are not liked here yet,
     // so it will be called before a function call is attempted (in m3_FindFunction)

@@ -12,6 +12,7 @@ set(sources
     "m3_exec.c"
     "m3_function.c"
     "m3_info.c"
+    "m3_m3c.c"
     "m3_module.c"
     "m3_parse.c"
 )
@@ -21,6 +22,10 @@ add_library(m3 STATIC ${sources})
 target_include_directories(m3 PUBLIC .)
 
 target_compile_features(m3 PRIVATE c_std_99)
+
+if(BUILD_M3C)
+    target_compile_definitions(m3 PUBLIC d_m3HasM3C=1)
+endif()
 
 if (CMAKE_C_COMPILER_ID MATCHES "MSVC")
     # add MSVC specific flags here
@@ -53,4 +58,3 @@ elseif(BUILD_WASI MATCHES "uvwasi")
     target_compile_definitions(m3 PUBLIC d_m3HasUVWASI)
     include_directories("${libuv_SOURCE_DIR}/include")
 endif()
-

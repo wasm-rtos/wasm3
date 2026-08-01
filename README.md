@@ -1,6 +1,6 @@
 # wasm3 runtime-control fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, and **process-local runtime snapshot save/load/restore** for WebAssembly runtimes.
+A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshots**, and an optional **persistent `.m3c` metacode cache**.
 
 This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, and restoring snapshots into fresh runtimes created from the same WASM module.
 
@@ -18,6 +18,7 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Process-local runtime snapshot save/load/restore support.
 * Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
+* Optional, storage-agnostic `.m3c` images with relocatable wasm3 metacode.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -58,6 +59,37 @@ M3Result m3_LoadRuntimeSnapshot(
     uint32_t buffer_size
 );
 ```
+
+The optional `.m3c` API is declared separately in `source/m3_m3c.h`.
+
+## Persistent `.m3c` metacode
+
+Enable this subsystem with `d_m3HasM3C=1`, or with `BUILD_M3C=ON` when using CMake. It is compiled out by default; the disabled build contains neither its implementation nor its error strings.
+
+`.m3c` stores the original module metadata together with already compiled, relocatable wasm3 metacode. `m3_ParseM3C()` reconstructs the module, and each defined function is read and relocated only when it is first needed. The temporary source-Wasm copy is released after `m3_LoadModule()` finishes module initialization.
+
+The API uses caller-provided positional `readAt`, `writeAt`, and optional `sync` callbacks. wasm3 therefore has no dependency on SD, FAT, flash drivers, or a particular operating system; the same API can target a memory buffer, file, block device, or custom object store.
+
+```c
+#include "m3_m3c.h"
+
+M3CStorage storage = {
+    .context = my_storage,
+    .readAt = storage_read_at,
+    .writeAt = storage_write_at,
+    .sync = storage_sync,
+};
+
+uint64_t image_size;
+M3Result result = m3_WriteM3C(module, &storage, 0, &image_size);
+
+IM3Module cached_module;
+result = m3_ParseM3C(environment, &cached_module, &storage, 0);
+```
+
+The v1 image is target-, configuration-, and metacode-ABI-specific. It validates its header, source Wasm, function bounds, and per-function contents before execution. Host callback pointers are never persisted; imports must be linked normally after loading the cached module.
+
+This first version materializes a called function's metacode in a normal wasm3 code page and keeps it for the runtime lifetime. It does not yet execute directly from storage or evict live code pages; bounded caching requires indirect call sites so eviction cannot leave stale code pointers.
 
 ## Fuel control
 

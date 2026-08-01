@@ -13,6 +13,9 @@
 #include "m3_exec.h"
 #include "m3_exception.h"
 #include "m3_info.h"
+#if d_m3HasM3C
+#include "m3_m3c_internal.h"
+#endif
 
 //----- EMIT --------------------------------------------------------------------------------------------------------------
 
@@ -38,8 +41,16 @@ M3Result  EnsureCodePageNumLines  (IM3Compilation o, u32 i_numLines)
             m3log (emit, "bridging new code page from: %d %p (free slots: %d) to: %d", o->page->info.sequence, GetPC (o), NumFreeLines (o->page), page->info.sequence);
             d_m3Assert (NumFreeLines (o->page) >= 2);
 
+            pc_t opLocation = GetPagePC (o->page);
             EmitWord (o->page, op_Branch);
+#if d_m3HasM3C
+            m3c_RecordOperation (o->runtime, opLocation, op_Branch);
+#endif
+            pc_t pointerLocation = GetPagePC (o->page);
             EmitWord (o->page, GetPagePC (page));
+#if d_m3HasM3C
+            m3c_RecordPointer (o->runtime, pointerLocation);
+#endif
 
             ReleaseCodePage (o->runtime, o->page);
 
@@ -72,7 +83,11 @@ M3Result  EmitOp  (IM3Compilation o, IM3Operation i_operation)
 # if d_m3RecordBacktraces
             EmitMappingEntry (o->page, o->lastOpcodeStart - o->module->wasmStart);
 # endif // d_m3RecordBacktraces
+            pc_t location = GetPagePC (o->page);
             EmitWord (o->page, i_operation);
+#if d_m3HasM3C
+            m3c_RecordOperation (o->runtime, location, i_operation);
+#endif
         }
     }
 
@@ -100,7 +115,12 @@ pc_t  EmitPointer  (IM3Compilation o, const void * const i_pointer)
     pc_t ptr = GetPagePC (o->page);
 
     if (o->page)
+    {
         EmitWord (o->page, i_pointer);
+#if d_m3HasM3C
+        m3c_RecordPointer (o->runtime, ptr);
+#endif
+    }
 
     return ptr;
 }
@@ -2568,6 +2588,174 @@ const M3OpInfo c_operationsFC [] =
 };
 
 
+#if d_m3HasM3C
+
+enum
+{
+    c_m3cOpMainBase     = 0x10000000u,
+    c_m3cOpFCBase       = 0x20000000u,
+    c_m3cOpInternalBase = 0x30000000u,
+    c_m3cOpPayloadMask  = 0x0fffffffu
+};
+
+// Operations emitted by compiler helpers rather than selected directly from
+// the Wasm opcode tables. Their order is part of d_m3M3CAbiVersion.
+static const IM3Operation c_m3cInternalOperations [] =
+{
+    op_Compile,
+    op_Entry,
+    op_End,
+    op_Unsupported,
+    op_CallRawFunction,
+    op_GetGlobal_s32,
+    op_GetGlobal_s64,
+    op_ContinueLoop,
+    op_ContinueLoopIf,
+    op_CopySlot_32,
+    op_PreserveCopySlot_32,
+    op_If_s,
+    op_BranchIfPrologue_s,
+    op_CopySlot_64,
+    op_PreserveCopySlot_64,
+    op_If_r,
+    op_BranchIfPrologue_r,
+    op_Select_i32_rss,
+    op_Select_i32_srs,
+    op_Select_i32_ssr,
+    op_Select_i32_sss,
+    op_Select_i64_rss,
+    op_Select_i64_srs,
+    op_Select_i64_ssr,
+    op_Select_i64_sss,
+#if d_m3HasFloat
+    op_Select_f32_sss,
+    op_Select_f32_srs,
+    op_Select_f32_ssr,
+    op_Select_f32_rss,
+    op_Select_f32_rrs,
+    op_Select_f32_rsr,
+    op_Select_f64_sss,
+    op_Select_f64_srs,
+    op_Select_f64_ssr,
+    op_Select_f64_rss,
+    op_Select_f64_rrs,
+    op_Select_f64_rsr,
+#endif
+    op_MemFill,
+    op_MemCopy,
+    op_SetGlobal_i32,
+    op_SetGlobal_i64,
+#if d_m3HasFloat
+    op_SetGlobal_f32,
+    op_SetGlobal_f64,
+#endif
+    op_SetGlobal_s32,
+    op_SetGlobal_s64,
+    op_SetRegister_i32,
+    op_SetRegister_i64,
+#if d_m3HasFloat
+    op_SetRegister_f32,
+    op_SetRegister_f64,
+#endif
+    op_SetSlot_i32,
+    op_SetSlot_i64,
+#if d_m3HasFloat
+    op_SetSlot_f32,
+    op_SetSlot_f64,
+#endif
+    op_PreserveSetSlot_i32,
+    op_PreserveSetSlot_i64,
+#if d_m3HasFloat
+    op_PreserveSetSlot_f32,
+    op_PreserveSetSlot_f64,
+#endif
+#if d_m3EnableOpTracing
+    op_DumpStack,
+#endif
+};
+
+M3Result  m3c_OperationToId  (IM3Operation i_operation, u32 * o_id)
+{
+    if (not i_operation or not o_id)
+        return m3Err_m3cUnsupportedRelocation;
+
+    // Only the real one-byte opcode range is used here. DEBUG appends helper
+    // operations to c_operations; those helpers are mapped by the fixed list.
+    u32 mainCount = M3_COUNT_OF (c_operations);
+    if (mainCount > 256)
+        mainCount = 256;
+
+    for (u32 opcode = 0; opcode < mainCount; ++opcode)
+    {
+        for (u32 variant = 0; variant < 4; ++variant)
+        {
+            if (c_operations [opcode].operations [variant] == i_operation)
+            {
+                *o_id = c_m3cOpMainBase | (opcode << 2) | variant;
+                return m3Err_none;
+            }
+        }
+    }
+
+    for (u32 opcode = 0; opcode < M3_COUNT_OF (c_operationsFC); ++opcode)
+    {
+        for (u32 variant = 0; variant < 4; ++variant)
+        {
+            if (c_operationsFC [opcode].operations [variant] == i_operation)
+            {
+                *o_id = c_m3cOpFCBase | (opcode << 2) | variant;
+                return m3Err_none;
+            }
+        }
+    }
+
+    for (u32 i = 0; i < M3_COUNT_OF (c_m3cInternalOperations); ++i)
+    {
+        if (c_m3cInternalOperations [i] == i_operation)
+        {
+            *o_id = c_m3cOpInternalBase | i;
+            return m3Err_none;
+        }
+    }
+
+    return m3Err_m3cUnsupportedRelocation;
+}
+
+
+IM3Operation  m3c_OperationFromId  (u32 i_id)
+{
+    u32 kind = i_id & ~c_m3cOpPayloadMask;
+    u32 payload = i_id & c_m3cOpPayloadMask;
+
+    if (kind == c_m3cOpMainBase)
+    {
+        u32 opcode = payload >> 2;
+        u32 variant = payload & 3;
+        u32 mainCount = M3_COUNT_OF (c_operations);
+        if (mainCount > 256)
+            mainCount = 256;
+        if (opcode < mainCount)
+            return c_operations [opcode].operations [variant];
+    }
+    else if (kind == c_m3cOpFCBase)
+    {
+        u32 opcode = payload >> 2;
+        u32 variant = payload & 3;
+        if (opcode < M3_COUNT_OF (c_operationsFC))
+            return c_operationsFC [opcode].operations [variant];
+    }
+    else if (kind == c_m3cOpInternalBase)
+    {
+        if (payload < M3_COUNT_OF (c_m3cInternalOperations))
+            return c_m3cInternalOperations [payload];
+    }
+
+    return NULL;
+}
+
+#endif // d_m3HasM3C
+
+
 IM3OpInfo  GetOpInfo  (m3opcode_t opcode)
 {
     switch (opcode >> 8) {
@@ -2861,6 +3049,11 @@ M3Result  ReserveConstants  (IM3Compilation o)
 
 M3Result  CompileFunction  (IM3Function io_function)
 {
+#if d_m3HasM3C
+    if (m3c_HasFunction (io_function))
+        return m3c_LoadFunction (io_function);
+#endif
+
     if (!io_function->wasm) return "function body is missing";
 
     IM3FuncType funcType = io_function->funcType;                   m3log (compile, "compiling: [%d] %s %s; wasm-size: %d",

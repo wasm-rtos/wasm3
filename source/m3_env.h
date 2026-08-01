@@ -119,6 +119,10 @@ typedef struct M3Module
     bool                    memoryImported;
     const char*             memoryExportName;
 
+# if d_m3HasM3C
+    void *                  m3cState;
+# endif
+
     //bool                    hasWasmCodeCopy;
 
     struct M3Module *       next;
@@ -183,6 +187,10 @@ typedef struct M3Runtime
 
     u32                     numCodePages;
     u32                     numActiveCodePages;
+
+# if d_m3HasM3C
+    void *                  m3cCompileContext;
+# endif
 
     IM3Module               modules;        // linked list of imported modules
 
