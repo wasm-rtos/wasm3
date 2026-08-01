@@ -1,12 +1,12 @@
 # wasm3 runtime-control fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshots**, and an optional **persistent `.m3c` metacode cache**.
+A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshots**, an optional **persistent `.m3c` metacode cache**, and optional **`dylink.0` WebAssembly libraries**.
 
 This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, and restoring snapshots into fresh runtimes created from the same WASM module.
 
 The original wasm3 project is a high-performance WebAssembly interpreter written in C. This fork keeps wasm3 as an interpreter, but extends it with runtime-control features needed for task scheduling, runtime swapping, and memory-pressure handling in higher-level systems.
 
-This fork is intended to be used as the WebAssembly backend for `microwasm-os`.
+This fork is intended to be used as the WebAssembly backend for `wasm-rtos`.
 
 ## What this fork adds
 
@@ -19,6 +19,7 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
 * Optional, storage-agnostic `.m3c` images with relocatable wasm3 metacode.
+* Optional `dylink.0` link groups with shared linear memory and a shared function table.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -61,6 +62,7 @@ M3Result m3_LoadRuntimeSnapshot(
 ```
 
 The optional `.m3c` API is declared separately in `source/m3_m3c.h`.
+The optional dynamic-linking API is declared separately in `source/m3_dylink.h`.
 
 ## Persistent `.m3c` metacode
 
@@ -90,6 +92,39 @@ result = m3_ParseM3C(environment, &cached_module, &storage, 0);
 The v1 image is target-, configuration-, and metacode-ABI-specific. It validates its header, source Wasm, function bounds, and per-function contents before execution. Host callback pointers are never persisted; imports must be linked normally after loading the cached module.
 
 This first version materializes a called function's metacode in a normal wasm3 code page and keeps it for the runtime lifetime. It does not yet execute directly from storage or evict live code pages; bounded caching requires indirect call sites so eviction cannot leave stale code pointers.
+
+## WebAssembly `dylink.0` libraries
+
+Enable this subsystem with `d_m3HasDylink=1`, or with `BUILD_DYLINK=ON` when using CMake. Zig builds use `-Ddylink=true`. It is compiled out by default; the disabled build contains no linker state or linker error strings.
+
+`m3_DylinkLoad()` loads a position-independent main module and its `NEEDED` libraries as one link group. The implementation follows the standard `dylink.0` conventions used by LLVM: every module receives an aligned `__memory_base` and `__table_base`, while all modules share one linear memory, function table, and `__stack_pointer`. It resolves direct function imports, `GOT.func`, and `GOT.mem`, then runs data relocations and constructors in dependency order.
+
+The module resolver returns an already parsed `IM3Module`, so storage remains a host decision. A resolver may return a module from `m3_ParseModule()` or `m3_ParseM3C()`; `.wasm` and `.m3c` modules can therefore be mixed in one link group.
+
+```c
+#include "m3_dylink.h"
+
+static M3Result resolve_library(void *context, const char *name,
+                                IM3Module *out_module)
+{
+    // Read from SD, a file, flash, IndexedDB, or another host-owned store.
+    return parse_named_module(context, name, out_module);
+}
+
+M3DylinkOptions options = {
+    .context = library_store,
+    .resolveModule = resolve_library,
+    .linkHostImports = link_wasi_and_device_imports,
+    .linearStackSize = 64 * 1024,
+};
+
+M3Result result = m3_DylinkLoad(runtime, app_module, "watch-app",
+                                &options);
+```
+
+Pointers produced by C remain 32-bit offsets in the shared linear memory. This lets a library return `const char *`, accept arrays or structs, and receive Wasm function pointers without host-side pointer wrappers.
+
+This first linker stage supports LLVM-style PIE mains and side modules. Non-PIE mains, TLS, runtime `dlopen`/`dlclose`, unloading, and symbol-version namespaces are intentionally rejected rather than partially emulated.
 
 ## Fuel control
 

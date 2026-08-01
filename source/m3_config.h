@@ -145,6 +145,13 @@
 #   define d_m3HasM3C                           0
 # endif
 
+// Optional WebAssembly dynamic linker for modules carrying the standard
+// "dylink.0" custom section.  Keep this independent from .m3c: either
+// feature can be enabled on its own, or both can be used together.
+# ifndef d_m3HasDylink
+#   define d_m3HasDylink                        0
+# endif
+
 // Bump this whenever the layout or semantics of emitted wasm3 metacode change.
 // .m3c images are deliberately tied to a compatible wasm3 build/target.
 # ifndef d_m3M3CAbiVersion

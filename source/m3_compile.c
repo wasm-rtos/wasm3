@@ -10,6 +10,9 @@
 
 #include "m3_env.h"
 #include "m3_compile.h"
+#if d_m3HasDylink
+#include "m3_dylink_internal.h"
+#endif
 #include "m3_exec.h"
 #include "m3_exception.h"
 #include "m3_info.h"
@@ -1385,7 +1388,11 @@ M3Result  Compile_GetGlobal  (IM3Compilation o, M3Global * i_global)
 
     IM3Operation op = Is64BitType (i_global->type) ? op_GetGlobal_s64 : op_GetGlobal_s32;
 _   (EmitOp (o, op));
+#if d_m3HasDylink
+    EmitPointer (o, m3d_GlobalValuePointer (i_global));
+#else
     EmitPointer (o, & i_global->i64Value);
+#endif
 _   (PushAllocatedSlotAndEmit (o, i_global->type));
 
     _catch: return result;
@@ -1408,7 +1415,11 @@ M3Result  Compile_SetGlobal  (IM3Compilation o, M3Global * i_global)
         else op = Is64BitType (type) ? op_SetGlobal_s64 : op_SetGlobal_s32;
 
 _      (EmitOp (o, op));
+#if d_m3HasDylink
+        EmitPointer (o, m3d_GlobalValuePointer (i_global));
+#else
         EmitPointer (o, & i_global->i64Value);
+#endif
 
         if (IsStackTopInSlot (o))
             EmitSlotOffset (o, GetStackTopSlotNumber (o));
@@ -1708,6 +1719,17 @@ _   (ReadLEB_u32 (& functionIndex, & o->wasm, o->wasmEnd));
     if (function)
     {                                                                   m3log (compile, d_indent " (func= [%d] '%s'; args= %d)",
                                                                                 get_indention_string (o), functionIndex, m3_GetFunctionName (function), function->funcType->numArgs);
+#if d_m3HasDylink
+        if (function->import.moduleUtf8)
+        {
+            u16 slotTop;
+_           (CompileCallArgsAndReturn (o, & slotTop, function->funcType, false));
+_           (EmitOp (o, op_CallLinked));
+            EmitPointer (o, function);
+            EmitSlotOffset (o, slotTop);
+        }
+        else
+#endif
         if (function->module)
         {
             u16 slotTop;
@@ -2671,6 +2693,9 @@ static const IM3Operation c_m3cInternalOperations [] =
 #endif
 #if d_m3EnableOpTracing
     op_DumpStack,
+#endif
+#if d_m3HasDylink
+    op_CallLinked,
 #endif
 };
 

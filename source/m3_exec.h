@@ -675,6 +675,60 @@ d_m3Op  (Call)
 }
 
 
+#if d_m3HasDylink
+d_m3Op  (CallLinked)
+{
+    IM3Function importFunction  = immediate (IM3Function);
+    i32 stackOffset             = immediate (i32);
+    IM3Memory memory            = m3MemInfo (_mem);
+
+    IM3Function function = m3d_ResolveFunction (importFunction);
+    m3stack_t sp = _sp + stackOffset;
+    u32 frameDepth = _runtime->numContinuationFrames;
+    m3ret_t r = m3Err_none;
+
+    if (M3_UNLIKELY(not function or not function->module))
+        r = m3Err_functionImportMissing;
+    else if (M3_UNLIKELY(function == importFunction
+                         and not function->compiled))
+        r = m3Err_functionImportMissing;
+    else if (M3_UNLIKELY(not function->compiled))
+        r = CompileFunction (function);
+
+    if (M3_LIKELY(not r))
+    {
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+        r = Call (_runtime, function->compiled, sp, _mem,
+                  d_m3OpDefaultArgs, d_m3BaseCstr);
+# else
+        r = Call (_runtime, function->compiled, sp, _mem, d_m3OpDefaultArgs);
+# endif
+    }
+
+    _mem = memory->mallocated;
+    if (M3_LIKELY(not r))
+        nextOp ();
+    else
+    {
+        if (r == m3Err_fuelExhausted)
+        {
+            m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc,
+                                                    _sp, _mem, _r0
+# if d_m3HasFloat
+                , _fp0
+# endif
+            );
+            if (parentResult != m3Err_fuelExhausted)
+                forwardTrap (parentResult);
+        }
+        else
+            pushBacktraceFrame ();
+        forwardTrap (r);
+    }
+}
+#endif
+
+
 d_m3Op  (CallIndirect)
 {
     u32 tableIndex              = slot (u32);
@@ -688,9 +742,20 @@ d_m3Op  (CallIndirect)
 
     m3ret_t r = m3Err_none;
 
-    if (M3_LIKELY(tableIndex < module->table0Size))
+    u32 tableSize;
+#if d_m3HasDylink
+    IM3Function * table = m3d_GetTable (module, & tableSize);
+#else
+    IM3Function * table = module->table0;
+    tableSize = module->table0Size;
+#endif
+
+    if (M3_LIKELY(tableIndex < tableSize))
     {
-        IM3Function function = module->table0 [tableIndex];
+        IM3Function function = table [tableIndex];
+#if d_m3HasDylink
+        function = m3d_ResolveFunction (function);
+#endif
 
         if (M3_LIKELY(function))
         {

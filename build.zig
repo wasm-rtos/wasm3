@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const libm3_only = b.option(bool, "libm3", "Build libwasm3 only") orelse false;
+    const enable_m3c = b.option(bool, "m3c", "Enable persistent .m3c images") orelse false;
+    const enable_dylink = b.option(bool, "dylink", "Enable dylink.0 runtime linking") orelse false;
 
     const libwasm3 = b.addStaticLibrary(.{
         .name = "m3",
@@ -13,6 +15,8 @@ pub fn build(b: *std.Build) !void {
     });
     libwasm3.root_module.sanitize_c = false; // fno-sanitize=undefined
     libwasm3.defineCMacro("d_m3HasTracer", null);
+    if (enable_m3c) libwasm3.defineCMacro("d_m3HasM3C", "1");
+    if (enable_dylink) libwasm3.defineCMacro("d_m3HasDylink", "1");
 
     if (libwasm3.rootModuleTarget().isWasm()) {
         if (libwasm3.rootModuleTarget().os.tag == .wasi) {
@@ -33,10 +37,12 @@ pub fn build(b: *std.Build) !void {
             "source/m3_code.c",
             "source/m3_compile.c",
             "source/m3_core.c",
+            "source/m3_dylink.c",
             "source/m3_env.c",
             "source/m3_exec.c",
             "source/m3_function.c",
             "source/m3_info.c",
+            "source/m3_m3c.c",
             "source/m3_module.c",
             "source/m3_parse.c",
         },

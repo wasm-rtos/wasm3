@@ -8,6 +8,7 @@ set(sources
     "m3_code.c"
     "m3_compile.c"
     "m3_core.c"
+    "m3_dylink.c"
     "m3_env.c"
     "m3_exec.c"
     "m3_function.c"
@@ -25,6 +26,10 @@ target_compile_features(m3 PRIVATE c_std_99)
 
 if(BUILD_M3C)
     target_compile_definitions(m3 PUBLIC d_m3HasM3C=1)
+endif()
+
+if(BUILD_DYLINK)
+    target_compile_definitions(m3 PUBLIC d_m3HasDylink=1)
 endif()
 
 if (CMAKE_C_COMPILER_ID MATCHES "MSVC")
