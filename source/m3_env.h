@@ -33,8 +33,6 @@ typedef struct M3Memory
     u32                     numPages;
     u32                     maxPages;
     u32                     pageSize;
-    u32                     memoryLimit;
-    u32                     referenceCount;
 }
 M3Memory;
 
@@ -204,7 +202,8 @@ typedef struct M3Runtime
 
     void *                  userdata;
 
-    IM3Memory               memory;
+    M3Memory                memory;
+    u32                     memoryLimit;
 
 #if d_m3EnableStrace >= 2
     u32                     callDepth;

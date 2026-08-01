@@ -1,8 +1,8 @@
 # wasm3 runtime-control fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshot save/load/restore**, and **shared linear memory between runtimes**.
+A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, and **process-local runtime snapshot save/load/restore** for WebAssembly runtimes.
 
-This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, restoring snapshots into fresh runtimes created from the same WASM module, and attaching an empty runtime to another runtime's linear memory.
+This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, and restoring snapshots into fresh runtimes created from the same WASM module.
 
 The original wasm3 project is a high-performance WebAssembly interpreter written in C. This fork keeps wasm3 as an interpreter, but extends it with runtime-control features needed for task scheduling, runtime swapping, and memory-pressure handling in higher-level systems.
 
@@ -18,7 +18,6 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Process-local runtime snapshot save/load/restore support.
 * Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
-* Reference-counted linear-memory sharing between independently owned runtimes.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -30,9 +29,6 @@ extern const char* m3Err_runtimeSuspended;
 extern const char* m3Err_snapshotInvalid;
 extern const char* m3Err_snapshotUnsupported;
 extern const char* m3Err_snapshotBufferTooSmall;
-extern const char* m3Err_sharedMemoryUnavailable;
-extern const char* m3Err_sharedMemoryInUse;
-extern const char* m3Err_sharedMemoryIncompatible;
 
 void m3_SetFuel(IM3Runtime runtime, uint64_t fuel);
 void m3_AddFuel(IM3Runtime runtime, uint64_t fuel);
@@ -61,26 +57,7 @@ M3Result m3_LoadRuntimeSnapshot(
     const uint8_t* buffer,
     uint32_t buffer_size
 );
-
-M3Result m3_ShareRuntimeMemory(
-    IM3Runtime target_runtime,
-    IM3Runtime source_runtime
-);
 ```
-
-## Shared runtime linear memory
-
-`m3_ShareRuntimeMemory(target, source)` makes an empty target runtime retain the source runtime's initialized linear memory. A module loaded into the target afterward must import a compatible memory.
-
-Only the linear memory is shared. Runtime stacks, globals, tables, code, fuel, suspension state, and user data remain independent. `memory.grow` updates the shared allocation, so every attached runtime observes the new size and obtains the current pointer through `m3_GetMemory()`.
-
-The source runtime may be freed before the target. The shared allocation remains alive until the last attached runtime is freed.
-
-The target runtime must not already contain a module, continuation, suspension state, or allocated linear memory. The imported memory's page size and limits must be compatible with the shared allocation. A runtime already attached to shared memory cannot load a module that defines its own memory.
-
-Runtime execution and memory-management calls must be externally serialized. The reference count and shared memory contents are not synchronized for concurrent access.
-
-Runtime snapshots are unsupported while the linear memory has more than one owner. A per-runtime snapshot cannot represent the live shared-memory relationship.
 
 ## Fuel control
 
@@ -225,12 +202,6 @@ Host-side counters, file handles, device state, OS state, graphics state, audio 
 `m3Err_snapshotUnsupported` is returned when the requested snapshot operation is not supported for the current runtime state. For example, saving a snapshot from a non-suspended runtime is unsupported.
 
 `m3Err_snapshotBufferTooSmall` is returned when the provided output buffer is smaller than the required snapshot size.
-
-`m3Err_sharedMemoryUnavailable` is returned when the source runtime has no initialized linear memory that can be retained.
-
-`m3Err_sharedMemoryInUse` is returned when the target runtime is not empty.
-
-`m3Err_sharedMemoryIncompatible` is returned when a module defines its own memory on an attached runtime or imports memory with incompatible limits.
 
 ## Intended use in microwasm-os
 

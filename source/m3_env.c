@@ -170,34 +170,6 @@ void  Environment_ReleaseCodePages  (IM3Environment i_environment, IM3CodePage i
 }
 
 
-static IM3Memory  NewMemory  (void)
-{
-    IM3Memory memory = m3_AllocStruct (M3Memory);
-
-    if (memory)
-        memory->referenceCount = 1;
-
-    return memory;
-}
-
-
-static void  RetainMemory  (IM3Memory i_memory)
-{
-    if (i_memory)
-        ++i_memory->referenceCount;
-}
-
-
-static void  ReleaseMemory  (IM3Memory i_memory)
-{
-    if (i_memory && --i_memory->referenceCount == 0)
-    {
-        m3_Free (i_memory->mallocated);
-        m3_Free (i_memory);
-    }
-}
-
-
 IM3Runtime  m3_NewRuntime  (IM3Environment i_environment, u32 i_stackSizeInBytes, void * i_userdata)
 {
     IM3Runtime runtime = m3_AllocStruct (M3Runtime);
@@ -209,30 +181,15 @@ IM3Runtime  m3_NewRuntime  (IM3Environment i_environment, u32 i_stackSizeInBytes
         runtime->environment = i_environment;
         runtime->userdata = i_userdata;
 
-        runtime->memory = NewMemory ();
+        runtime->originStack = m3_Malloc ("Wasm Stack", i_stackSizeInBytes + 4*sizeof (m3slot_t)); // TODO: more precise stack checks
 
-        if (runtime->memory)
+        if (runtime->originStack)
         {
-            runtime->originStack = m3_Malloc ("Wasm Stack", i_stackSizeInBytes + 4*sizeof (m3slot_t)); // TODO: more precise stack checks
-
-            if (runtime->originStack)
-            {
-                runtime->stack = runtime->originStack;
-                runtime->stackSize = i_stackSizeInBytes;
-                runtime->numStackSlots = i_stackSizeInBytes / sizeof (m3slot_t);     m3log (runtime, "new stack: %p", runtime->originStack);
-            }
-            else
-            {
-                ReleaseMemory (runtime->memory);
-                m3_Free (runtime);
-                runtime = NULL;
-            }
+            runtime->stack = runtime->originStack;
+            runtime->stackSize = i_stackSizeInBytes;
+            runtime->numStackSlots = i_stackSizeInBytes / sizeof (m3slot_t);         m3log (runtime, "new stack: %p", runtime->originStack);
         }
-        else
-        {
-            m3_Free (runtime);
-            runtime = NULL;
-        }
+        else m3_Free (runtime);
     }
 
     return runtime;
@@ -241,38 +198,6 @@ IM3Runtime  m3_NewRuntime  (IM3Environment i_environment, u32 i_stackSizeInBytes
 void *  m3_GetUserData  (IM3Runtime i_runtime)
 {
     return i_runtime ? i_runtime->userdata : NULL;
-}
-
-
-M3Result  m3_ShareRuntimeMemory  (IM3Runtime io_targetRuntime, IM3Runtime i_sourceRuntime)
-{
-    if (not io_targetRuntime || not i_sourceRuntime || not i_sourceRuntime->memory ||
-        not i_sourceRuntime->memory->mallocated)
-    {
-        return m3Err_sharedMemoryUnavailable;
-    }
-
-    if (io_targetRuntime == i_sourceRuntime ||
-        io_targetRuntime->memory == i_sourceRuntime->memory)
-    {
-        return m3Err_none;
-    }
-
-    if (i_sourceRuntime->memory->referenceCount == UINT32_MAX)
-        return m3Err_sharedMemoryUnavailable;
-
-    if (io_targetRuntime->modules || io_targetRuntime->suspended ||
-        io_targetRuntime->numContinuationFrames || not io_targetRuntime->memory ||
-        io_targetRuntime->memory->mallocated)
-    {
-        return m3Err_sharedMemoryInUse;
-    }
-
-    RetainMemory (i_sourceRuntime->memory);
-    ReleaseMemory (io_targetRuntime->memory);
-    io_targetRuntime->memory = i_sourceRuntime->memory;
-
-    return m3Err_none;
 }
 
 
@@ -311,8 +236,7 @@ void  Runtime_Release  (IM3Runtime i_runtime)
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesFull);
 
     m3_Free (i_runtime->originStack);
-    ReleaseMemory (i_runtime->memory);
-    i_runtime->memory = NULL;
+    m3_Free (i_runtime->memory.mallocated);
     m3_Free (i_runtime->continuationFrames);
 }
 
@@ -412,33 +336,14 @@ M3Result  EvaluateExpression  (IM3Module i_module, void * o_expressed, u8 i_type
 
 M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
 {
-    M3Result result = m3Err_none;
-    IM3Memory memory = io_runtime->memory;
-    u32 pageSize = i_module->memoryInfo.pageSize
-                 ? i_module->memoryInfo.pageSize
-                 : d_m3DefaultMemPageSize;
+    M3Result result = m3Err_none;                                     //d_m3Assert (not io_runtime->memory.wasmPages);
 
-    if (i_module->memoryImported)
+    if (not i_module->memoryImported)
     {
-        if (not memory || not memory->mallocated)
-            return m3Err_sharedMemoryUnavailable;
-
-        if (memory->pageSize != pageSize ||
-            memory->numPages < i_module->memoryInfo.initPages ||
-            (i_module->memoryInfo.maxPages &&
-             memory->maxPages > i_module->memoryInfo.maxPages))
-        {
-            return m3Err_sharedMemoryIncompatible;
-        }
-    }
-    else
-    {
-        if (not memory || memory->referenceCount > 1)
-            return m3Err_sharedMemoryIncompatible;
-
         u32 maxPages = i_module->memoryInfo.maxPages;
-        memory->maxPages = maxPages ? maxPages : 65536;
-        memory->pageSize = pageSize;
+        u32 pageSize = i_module->memoryInfo.pageSize;
+        io_runtime->memory.maxPages = maxPages ? maxPages : 65536;
+        io_runtime->memory.pageSize = pageSize ? pageSize : d_m3DefaultMemPageSize;
 
         result = ResizeMemory (io_runtime, i_module->memoryInfo.initPages);
     }
@@ -453,15 +358,12 @@ M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
 
     u32 numPagesToAlloc = i_numPages;
 
-    IM3Memory memory = io_runtime->memory;
-
-    if (not memory)
-        return m3Err_sharedMemoryUnavailable;
+    M3Memory * memory = & io_runtime->memory;
 
 #if 0 // Temporary fix for memory allocation
     if (memory->mallocated) {
         memory->numPages = i_numPages;
-        memory->mallocated->end = memory->wasmPages + (memory->numPages * memory->pageSize);
+        memory->mallocated->end = memory->wasmPages + (memory->numPages * io_runtime->memory.pageSize);
         return result;
     }
 
@@ -470,22 +372,22 @@ M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
 
     if (numPagesToAlloc <= memory->maxPages)
     {
-        size_t numPageBytes = numPagesToAlloc * memory->pageSize;
+        size_t numPageBytes = numPagesToAlloc * io_runtime->memory.pageSize;
 
 #if d_m3MaxLinearMemoryPages > 0
         _throwif("linear memory limitation exceeded", numPagesToAlloc > d_m3MaxLinearMemoryPages);
 #endif
 
         // Limit the amount of memory that gets actually allocated
-        if (memory->memoryLimit) {
-            numPageBytes = M3_MIN (numPageBytes, memory->memoryLimit);
+        if (io_runtime->memoryLimit) {
+            numPageBytes = M3_MIN (numPageBytes, io_runtime->memoryLimit);
         }
 
         size_t numBytes = numPageBytes + sizeof (M3MemoryHeader);
 
-        size_t numPreviousBytes = memory->mallocated
-                                ? memory->mallocated->length + sizeof (M3MemoryHeader)
-                                : 0;
+        size_t numPreviousBytes = memory->numPages * io_runtime->memory.pageSize;
+        if (numPreviousBytes)
+            numPreviousBytes += sizeof (M3MemoryHeader);
 
         void* newMem = m3_Realloc ("Wasm Linear Memory", memory->mallocated, numBytes, numPreviousBytes);
         _throwifnull(newMem);
@@ -499,6 +401,9 @@ M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
         memory->numPages = numPagesToAlloc;
 
         memory->mallocated->length =  numPageBytes;
+        memory->mallocated->runtime = io_runtime;
+
+        memory->mallocated->maxStack = (m3slot_t *) io_runtime->stack + io_runtime->numStackSlots;
 
         m3log (runtime, "resized old: %p; mem: %p; length: %zu; pages: %d", oldMallocated, memory->mallocated, memory->mallocated->length, memory->numPages);
     }
@@ -673,9 +578,9 @@ _           (CompileFunction (function));
         io_module->startFunction = -1;
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-        result = (M3Result) RunCode (runtime, function->compiled, (m3stack_t) runtime->stack, runtime->memory->mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
+        result = (M3Result) RunCode (runtime, function->compiled, (m3stack_t) runtime->stack, runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-        result = (M3Result) RunCode (runtime, function->compiled, (m3stack_t) runtime->stack, runtime->memory->mallocated, d_m3OpDefaultArgs);
+        result = (M3Result) RunCode (runtime, function->compiled, (m3stack_t) runtime->stack, runtime->memory.mallocated, d_m3OpDefaultArgs);
 # endif
 
         if (result)
@@ -699,7 +604,7 @@ M3Result  m3_LoadModule  (IM3Runtime io_runtime, IM3Module io_module)
     }
 
     io_module->runtime = io_runtime;
-    IM3Memory memory = io_runtime->memory;
+    M3Memory * memory = & io_runtime->memory;
 
 _   (InitMemory (io_runtime, io_module));
 _   (InitGlobals (io_module));
@@ -1002,15 +907,14 @@ M3Result  m3_Resume  (IM3Runtime runtime)
     while (runtime->numContinuationFrames)
     {
         M3ContinuationFrame frame = runtime->continuationFrames [--runtime->numContinuationFrames];
-        M3MemoryHeader * memory = frame.mem ? runtime->memory->mallocated : NULL;
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, memory, frame.r0
+        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, frame.mem, frame.r0
 #   if d_m3HasFloat
             , frame.fp0
 #   endif
             , d_m3BaseCstr);
 # else
-        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, memory, frame.r0
+        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, frame.mem, frame.r0
 #   if d_m3HasFloat
             , frame.fp0
 #   endif
@@ -1095,9 +999,9 @@ _   (checkStartFunction(i_function->module))
     }
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
 # endif
     ReportNativeStackUsage ();
 
@@ -1148,9 +1052,9 @@ _   (checkStartFunction(i_function->module))
     }
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
 # endif
 
     ReportNativeStackUsage ();
@@ -1199,9 +1103,9 @@ _   (checkStartFunction(i_function->module))
     }
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs, d_m3BaseCstr);
 # else
-    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory->mallocated, d_m3OpDefaultArgs);
+    result = (M3Result) RunCode (runtime, i_function->compiled, (m3stack_t)(runtime->stack), runtime->memory.mallocated, d_m3OpDefaultArgs);
 # endif
     
     ReportNativeStackUsage ();
@@ -1396,18 +1300,17 @@ void m3_ResetErrorInfo (IM3Runtime i_runtime)
 uint8_t *  m3_GetMemory  (IM3Runtime i_runtime, uint32_t * o_memorySizeInBytes, uint32_t i_memoryIndex)
 {
     uint8_t * memory = NULL;                                                    d_m3Assert (i_memoryIndex == 0);
-    u32 size = 0;
 
-    if (i_runtime && i_runtime->memory && i_runtime->memory->mallocated)
+    if (i_runtime)
     {
-        size = (u32) i_runtime->memory->mallocated->length;
+        u32 size = (u32) i_runtime->memory.mallocated->length;
+
+        if (o_memorySizeInBytes)
+            * o_memorySizeInBytes = size;
 
         if (size)
-            memory = m3MemData (i_runtime->memory->mallocated);
+            memory = m3MemData (i_runtime->memory.mallocated);
     }
-
-    if (o_memorySizeInBytes)
-        * o_memorySizeInBytes = size;
 
     return memory;
 }
@@ -1415,10 +1318,7 @@ uint8_t *  m3_GetMemory  (IM3Runtime i_runtime, uint32_t * o_memorySizeInBytes, 
 
 uint32_t  m3_GetMemorySize  (IM3Runtime i_runtime)
 {
-    if (not i_runtime || not i_runtime->memory || not i_runtime->memory->mallocated)
-        return 0;
-
-    return (u32) i_runtime->memory->mallocated->length;
+    return i_runtime->memory.mallocated->length;
 }
 
 
@@ -1525,7 +1425,7 @@ static bool SnapshotPCInCodeRange (IM3Runtime runtime, pc_t pc)
 
 static u32 SnapshotSize (IM3Runtime runtime)
 {
-    u32 memoryBytes = runtime->memory->mallocated ? (u32) runtime->memory->mallocated->length : 0;
+    u32 memoryBytes = runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0;
     return (u32)(sizeof (M3SnapshotHeader) +
                  runtime->numContinuationFrames * sizeof (M3SnapshotFrame) +
                  runtime->stackSize + memoryBytes +
@@ -1535,8 +1435,7 @@ static u32 SnapshotSize (IM3Runtime runtime)
 M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
 {
     if (not runtime or not out_size) return m3Err_snapshotInvalid;
-    if (not runtime->memory || runtime->memory->referenceCount > 1 ||
-        not runtime->suspended) return m3Err_snapshotUnsupported;
+    if (not runtime->suspended) return m3Err_snapshotUnsupported;
     *out_size = SnapshotSize (runtime);
     return m3Err_none;
 }
@@ -1544,8 +1443,7 @@ M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
 M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t buffer_size, uint32_t * out_size)
 {
     if (not runtime or not out_size) return m3Err_snapshotInvalid;
-    if (not runtime->memory || runtime->memory->referenceCount > 1 ||
-        not runtime->suspended or not runtime->suspendedFunction) return m3Err_snapshotUnsupported;
+    if (not runtime->suspended or not runtime->suspendedFunction) return m3Err_snapshotUnsupported;
     u32 need = SnapshotSize (runtime); *out_size = need;
     if (not buffer or buffer_size < need) return m3Err_snapshotBufferTooSmall;
 
@@ -1556,8 +1454,8 @@ M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t 
     h.magic = M3_SNAPSHOT_MAGIC; h.version = M3_SNAPSHOT_VERSION; h.headerSize = sizeof h; h.flags = M3_SNAPSHOT_FLAGS_FLOAT; h.totalSize = need;
     h.stackSize = runtime->stackSize; h.numStackSlots = runtime->numStackSlots; h.fuel = runtime->fuel;
     h.fuelEnabled = runtime->fuelEnabled; h.suspended = runtime->suspended; h.frameCount = runtime->numContinuationFrames;
-    h.stackBytes = runtime->stackSize; h.memoryPages = runtime->memory->numPages; h.memoryPageSize = runtime->memory->pageSize;
-    h.memoryBytes = runtime->memory->mallocated ? (u32) runtime->memory->mallocated->length : 0;
+    h.stackBytes = runtime->stackSize; h.memoryPages = runtime->memory.numPages; h.memoryPageSize = runtime->memory.pageSize;
+    h.memoryBytes = runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0;
     h.moduleCount = SnapshotCountModules (runtime); h.globalCount = SnapshotCountGlobals (runtime);
     h.suspendedModuleIndex = smi; h.suspendedFunctionIndex = sfi;
 
@@ -1573,7 +1471,7 @@ M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t 
         memcpy (p, &sf, sizeof sf); p += sizeof sf;
     }
     memcpy (p, runtime->stack, runtime->stackSize); p += runtime->stackSize;
-    if (h.memoryBytes) { memcpy (p, m3MemData (runtime->memory->mallocated), h.memoryBytes); p += h.memoryBytes; }
+    if (h.memoryBytes) { memcpy (p, m3MemData (runtime->memory.mallocated), h.memoryBytes); p += h.memoryBytes; }
     u32 mi = 0; for (IM3Module m = runtime->modules; m; m = m->next, mi++) for (u32 gi = 0; gi < m->numGlobals; gi++) {
         M3Global * g = &m->globals[gi]; M3SnapshotGlobal sg; sg.moduleIndex = mi; sg.globalIndex = gi; sg.type = g->type; sg.value = g->i64Value;
         memcpy (p, &sg, sizeof sg); p += sizeof sg;
@@ -1584,16 +1482,15 @@ M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t 
 M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uint32_t buffer_size)
 {
     if (not runtime or not buffer or buffer_size < sizeof (M3SnapshotHeader)) return m3Err_snapshotInvalid;
-    if (not runtime->memory || runtime->memory->referenceCount > 1) return m3Err_snapshotUnsupported;
     const u8 * p = buffer; M3SnapshotHeader h; memcpy (&h, p, sizeof h); p += sizeof h;
     if (h.magic != M3_SNAPSHOT_MAGIC or h.version != M3_SNAPSHOT_VERSION or h.headerSize != sizeof h or h.flags != M3_SNAPSHOT_FLAGS_FLOAT) return m3Err_snapshotInvalid;
     if (h.stackSize != runtime->stackSize or h.numStackSlots != runtime->numStackSlots) return m3Err_snapshotInvalid;
     if (h.moduleCount != SnapshotCountModules (runtime) or h.globalCount != SnapshotCountGlobals (runtime)) return m3Err_snapshotInvalid;
     if (h.frameCount == 0 or h.frameCount > 1024) return m3Err_snapshotInvalid;
     u32 need = (u32)(sizeof h + h.frameCount * sizeof (M3SnapshotFrame) + h.stackBytes + h.memoryBytes + h.globalCount * sizeof (M3SnapshotGlobal));
-    if (h.totalSize != need or buffer_size < h.totalSize or h.stackBytes != runtime->stackSize or h.memoryPageSize != runtime->memory->pageSize) return m3Err_snapshotInvalid;
+    if (h.totalSize != need or buffer_size < h.totalSize or h.stackBytes != runtime->stackSize or h.memoryPageSize != runtime->memory.pageSize) return m3Err_snapshotInvalid;
     if (ResizeMemory (runtime, h.memoryPages)) return m3Err_snapshotInvalid;
-    if ((runtime->memory->mallocated ? (u32) runtime->memory->mallocated->length : 0) != h.memoryBytes) return m3Err_snapshotInvalid;
+    if ((runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0) != h.memoryBytes) return m3Err_snapshotInvalid;
 
     for (IM3Module m = runtime->modules; m; m = m->next) { M3Result r = m3_CompileModule (m); if (r) return r; }
     IM3Module sm = SnapshotGetModule (runtime, h.suspendedModuleIndex);
@@ -1609,7 +1506,7 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
         pc_t pc = SnapshotGetFunctionPC (runtime, sf.moduleIndex, sf.functionIndex, sf.pcOffset); if (not pc or not SnapshotPCInCodeRange (runtime, pc)) return m3Err_snapshotInvalid;
         if (sf.spSlotOffset > runtime->numStackSlots) return m3Err_snapshotInvalid;
         runtime->continuationFrames[i].pc = pc; runtime->continuationFrames[i].sp = (m3stack_t) runtime->stack + sf.spSlotOffset;
-        runtime->continuationFrames[i].mem = (sf.memoryIndex == 0) ? runtime->memory->mallocated : NULL;
+        runtime->continuationFrames[i].mem = (sf.memoryIndex == 0) ? runtime->memory.mallocated : NULL;
         if (sf.memoryIndex != 0 && sf.memoryIndex != UINT32_MAX) return m3Err_snapshotInvalid;
         runtime->continuationFrames[i].r0 = (m3reg_t) sf.r0; runtime->continuationFrames[i].allowInternalControlFlow = sf.allowInternalControlFlow;
 #if d_m3HasFloat
@@ -1617,7 +1514,7 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
 #endif
     }
     memcpy (runtime->stack, p, runtime->stackSize); p += runtime->stackSize;
-    if (h.memoryBytes) { memcpy (m3MemData (runtime->memory->mallocated), p, h.memoryBytes); p += h.memoryBytes; }
+    if (h.memoryBytes) { memcpy (m3MemData (runtime->memory.mallocated), p, h.memoryBytes); p += h.memoryBytes; }
     for (u32 i = 0; i < h.globalCount; i++) {
         M3SnapshotGlobal sg; memcpy (&sg, p, sizeof sg); p += sizeof sg; IM3Module m = SnapshotGetModule (runtime, sg.moduleIndex);
         if (not m or sg.globalIndex >= m->numGlobals or m->globals[sg.globalIndex].type != sg.type) return m3Err_snapshotInvalid;
