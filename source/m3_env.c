@@ -15,6 +15,9 @@
 #if d_m3HasM3C
 #include "m3_m3c_internal.h"
 #endif
+#if d_m3HasDylink
+#include "m3_dylink_internal.h"
+#endif
 
 
 IM3Environment  m3_NewEnvironment  ()
@@ -235,6 +238,10 @@ void  Runtime_Release  (IM3Runtime i_runtime)
 {
     ForEachModule (i_runtime, _FreeModule, NULL);                   d_m3Assert (i_runtime->numActiveCodePages == 0);
 
+#if d_m3HasDylink
+    m3d_ReleaseRuntime (i_runtime);
+#endif
+
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesOpen);
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesFull);
 
@@ -337,6 +344,28 @@ M3Result  EvaluateExpression  (IM3Module i_module, void * o_expressed, u8 i_type
 }
 
 
+#if d_m3HasDylink
+M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
+{
+    M3Result result = m3Err_none;
+
+    // m3_DylinkLoad has already combined the PIE main's defined memory and
+    // every side module's imported limits into one allocation.  Do not let
+    // loading the main resize that shared allocation back to its local
+    // minimum.
+    if (not io_runtime->dylinkState and not i_module->memoryImported)
+    {
+        u32 maxPages = i_module->memoryInfo.maxPages;
+        u32 pageSize = i_module->memoryInfo.pageSize;
+        io_runtime->memory.maxPages = maxPages ? maxPages : 65536;
+        io_runtime->memory.pageSize = pageSize ? pageSize : d_m3DefaultMemPageSize;
+
+        result = ResizeMemory (io_runtime, i_module->memoryInfo.initPages);
+    }
+
+    return result;
+}
+#else
 M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
 {
     M3Result result = m3Err_none;                                     //d_m3Assert (not io_runtime->memory.wasmPages);
@@ -353,6 +382,7 @@ M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
 
     return result;
 }
+#endif
 
 
 M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
@@ -487,6 +517,61 @@ _       (EvaluateExpression (io_module, & segmentOffset, c_m3Type_i32, & start, 
 }
 
 
+#if d_m3HasDylink
+M3Result  InitElements  (IM3Module io_module)
+{
+    M3Result result = m3Err_none;
+
+    bytes_t bytes = io_module->elementSection;
+    cbytes_t end = io_module->elementSectionEnd;
+    u32 tableSize = 0;
+    IM3Function * table = m3d_GetTable (io_module, & tableSize);
+    bool shared = io_module->runtime and io_module->runtime->dylinkState;
+
+    for (u32 i = 0; i < io_module->numElementSegments; ++i)
+    {
+        u32 index;
+_       (ReadLEB_u32 (& index, & bytes, end));
+
+        if (index == 0)
+        {
+            i32 offset;
+_           (EvaluateExpression (io_module, & offset, c_m3Type_i32, & bytes, end));
+            _throwif ("table underflow", offset < 0);
+
+            u32 numElements;
+_           (ReadLEB_u32 (& numElements, & bytes, end));
+
+            size_t endElement = (size_t) numElements + offset;
+            _throwif ("table overflow", endElement > d_m3MaxSaneTableSize);
+
+            if (endElement > tableSize)
+            {
+                _throwif ("shared table allocation overflow", shared);
+                io_module->table0 = m3_ReallocArray (IM3Function,
+                                                     io_module->table0,
+                                                     endElement, tableSize);
+                io_module->table0Size = tableSize = (u32) endElement;
+                table = io_module->table0;
+            }
+            _throwifnull (table);
+
+            for (u32 e = 0; e < numElements; ++e)
+            {
+                u32 functionIndex;
+_               (ReadLEB_u32 (& functionIndex, & bytes, end));
+                _throwif ("function index out of range",
+                          functionIndex >= io_module->numFunctions);
+                table [e + offset] = & io_module->functions [functionIndex];
+            }
+        }
+        else _throw ("element table index must be zero for MVP");
+    }
+
+_catch:
+    return result;
+}
+#else
 M3Result  InitElements  (IM3Module io_module)
 {
     M3Result result = m3Err_none;
@@ -534,6 +619,7 @@ _               (ReadLEB_u32 (& functionIndex, & bytes, end));
 
     _catch: return result;
 }
+#endif
 
 M3Result  m3_CompileModule  (IM3Module io_module)
 {
@@ -570,6 +656,9 @@ M3Result  m3_RunStart  (IM3Module io_module)
     if (io_module and io_module->startFunction >= 0)
     {
         IM3Function function = & io_module->functions [io_module->startFunction];
+#if d_m3HasDylink
+        function = m3d_ResolveFunction (function);
+#endif
 
         if (not function->compiled)
         {
@@ -676,6 +765,10 @@ M3Result  m3_GetGlobal  (IM3Global                 i_global,
 {
     if (not i_global) return m3Err_globalLookupFailed;
 
+#if d_m3HasDylink
+    i_global = m3d_ResolveGlobal (i_global);
+#endif
+
     switch (i_global->type) {
     case c_m3Type_i32: o_value->value.i32 = i_global->i32Value; break;
     case c_m3Type_i64: o_value->value.i64 = i_global->i64Value; break;
@@ -694,6 +787,9 @@ M3Result  m3_SetGlobal  (IM3Global                 i_global,
                          const IM3TaggedValue      i_value)
 {
     if (not i_global) return m3Err_globalLookupFailed;
+#if d_m3HasDylink
+    i_global = m3d_ResolveGlobal (i_global);
+#endif
     if (not i_global->isMutable) return m3Err_globalNotMutable;
     if (i_global->type != i_value->type) return m3Err_globalTypeMismatch;
 
@@ -759,6 +855,9 @@ M3Result  m3_FindFunction  (IM3Function * o_function, IM3Runtime i_runtime, cons
     }
 
     function = (IM3Function) ForEachModule (i_runtime, (ModuleVisitor) v_FindFunction, (void *) i_functionName);
+#if d_m3HasDylink
+    function = m3d_ResolveFunction (function);
+#endif
 
     if (function)
     {
@@ -782,12 +881,22 @@ _           (CompileFunction (function))
 M3Result  m3_GetTableFunction  (IM3Function * o_function, IM3Module i_module, uint32_t i_index)
 {
 _try {
-    if (i_index >= i_module->table0Size)
+    u32 tableSize;
+#if d_m3HasDylink
+    IM3Function * table = m3d_GetTable (i_module, & tableSize);
+#else
+    IM3Function * table = i_module->table0;
+    tableSize = i_module->table0Size;
+#endif
+    if (i_index >= tableSize)
     {
         _throw ("function index out of range");
     }
 
-    IM3Function function = i_module->table0[i_index];
+    IM3Function function = table [i_index];
+#if d_m3HasDylink
+    function = m3d_ResolveFunction (function);
+#endif
 
     if (function)
     {
@@ -1488,7 +1597,12 @@ M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t 
     memcpy (p, runtime->stack, runtime->stackSize); p += runtime->stackSize;
     if (h.memoryBytes) { memcpy (p, m3MemData (runtime->memory.mallocated), h.memoryBytes); p += h.memoryBytes; }
     u32 mi = 0; for (IM3Module m = runtime->modules; m; m = m->next, mi++) for (u32 gi = 0; gi < m->numGlobals; gi++) {
-        M3Global * g = &m->globals[gi]; M3SnapshotGlobal sg; sg.moduleIndex = mi; sg.globalIndex = gi; sg.type = g->type; sg.value = g->i64Value;
+        M3Global * g = &m->globals[gi]; M3SnapshotGlobal sg; sg.moduleIndex = mi; sg.globalIndex = gi; sg.type = g->type;
+#if d_m3HasDylink
+        sg.value = *(u64 *) m3d_GlobalValuePointer (g);
+#else
+        sg.value = g->i64Value;
+#endif
         memcpy (p, &sg, sizeof sg); p += sizeof sg;
     }
     return m3Err_none;
@@ -1533,7 +1647,11 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
     for (u32 i = 0; i < h.globalCount; i++) {
         M3SnapshotGlobal sg; memcpy (&sg, p, sizeof sg); p += sizeof sg; IM3Module m = SnapshotGetModule (runtime, sg.moduleIndex);
         if (not m or sg.globalIndex >= m->numGlobals or m->globals[sg.globalIndex].type != sg.type) return m3Err_snapshotInvalid;
+#if d_m3HasDylink
+        *(u64 *) m3d_GlobalValuePointer (&m->globals[sg.globalIndex]) = sg.value;
+#else
         m->globals[sg.globalIndex].i64Value = sg.value;
+#endif
     }
     runtime->fuel = h.fuel; runtime->fuelEnabled = h.fuelEnabled; runtime->suspended = true;
     runtime->numContinuationFrames = h.frameCount; runtime->suspendedFunction = &sm->functions[h.suspendedFunctionIndex]; runtime->lastCalled = NULL;

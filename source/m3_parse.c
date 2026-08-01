@@ -9,14 +9,37 @@
 #include "m3_compile.h"
 #include "m3_exception.h"
 #include "m3_info.h"
+#if d_m3HasDylink
+#include "m3_dylink_internal.h"
+#endif
 
 
-M3Result  ParseType_Table  (IM3Module io_module, bytes_t i_bytes, cbytes_t i_end)
+#if d_m3HasDylink
+M3Result  ParseType_Table  (IM3Module io_module, bytes_t * io_bytes,
+                            cbytes_t i_end)
 {
     M3Result result = m3Err_none;
 
+    u8 elementType;
+    u8 flags;
+    u32 initial;
+    u32 maximum = 0;
+_   (Read_u8 (& elementType, io_bytes, i_end));
+    _throwif (m3Err_wasmMalformed, elementType != 0x70); // funcref
+_   (ReadLEB_u7 (& flags, io_bytes, i_end));
+    _throwif (m3Err_wasmMalformed, flags & ~1u);
+_   (ReadLEB_u32 (& initial, io_bytes, i_end));
+    if (flags & 1u)
+_       (ReadLEB_u32 (& maximum, io_bytes, i_end));
+    _throwif (m3Err_wasmMalformed, maximum and maximum < initial);
+
+    io_module->table0InitSize = initial;
+    io_module->table0MaxSize = maximum;
+
+_catch:
     return result;
 }
+#endif
 
 
 M3Result  ParseType_Memory  (M3MemoryInfo * o_memory, bytes_t * io_bytes, cbytes_t i_end)
@@ -184,7 +207,13 @@ _               (Module_AddFunction (io_module, typeIndex, & import))
             break;
 
             case d_externalKind_table:
-//                  result = ParseType_Table (& i_bytes, i_end);
+#if d_m3HasDylink
+_               (ParseType_Table (io_module, & i_bytes, i_end));
+                _throwif (m3Err_wasmMalformed, io_module->table0Imported);
+                io_module->table0Imported = true;
+                io_module->table0Import = import;
+                import = clearImport;
+#endif
                 break;
 
             case d_externalKind_memory:
@@ -459,10 +488,31 @@ _   (ReadLEB_u32 (& numMemories, & i_bytes, i_end));                            
 
     _throwif (m3Err_tooManyMemorySections, numMemories > 1);
 
-    ParseType_Memory (& io_module->memoryInfo, & i_bytes, i_end);
+_   (ParseType_Memory (& io_module->memoryInfo, & i_bytes, i_end));
 
     _catch: return result;
 }
+
+
+#if d_m3HasDylink
+M3Result  ParseSection_Table  (M3Module * io_module, bytes_t i_bytes,
+                               cbytes_t i_end)
+{
+    M3Result result = m3Err_none;
+    u32 numTables;
+_   (ReadLEB_u32 (& numTables, & i_bytes, i_end));
+    _throwif (m3Err_wasmMalformed, numTables > 1);
+    if (numTables)
+    {
+        _throwif (m3Err_wasmMalformed, io_module->table0Imported);
+_       (ParseType_Table (io_module, & i_bytes, i_end));
+    }
+    _throwif (m3Err_wasmSectionUnderrun, i_bytes != i_end);
+
+_catch:
+    return result;
+}
+#endif
 
 
 M3Result  ParseSection_Global  (M3Module * io_module, bytes_t i_bytes, cbytes_t i_end)
@@ -550,13 +600,17 @@ _               (Read_utf8 (& name, & i_bytes, i_end));
 
 M3Result  ParseSection_Custom  (M3Module * io_module, bytes_t i_bytes, cbytes_t i_end)
 {
-    M3Result result;
+    M3Result result = m3Err_none;
 
     cstr_t name;
 _   (Read_utf8 (& name, & i_bytes, i_end));
                                                                                     m3log (parse, "** Custom: '%s'", name);
     if (strcmp (name, "name") == 0) {
 _       (ParseSection_Name(io_module, i_bytes, i_end));
+#if d_m3HasDylink
+    } else if (strcmp (name, "dylink.0") == 0) {
+_       (m3d_ParseSection (io_module, i_bytes, i_end));
+#endif
     } else if (io_module->environment->customSectionHandler) {
 _       (io_module->environment->customSectionHandler(io_module, name, i_bytes, i_end));
     }
@@ -579,7 +633,11 @@ M3Result  ParseModuleSection  (M3Module * o_module, u8 i_sectionType, bytes_t i_
         ParseSection_Type,      // 1
         ParseSection_Import,    // 2
         ParseSection_Function,  // 3
+#if d_m3HasDylink
+        ParseSection_Table,     // 4
+#else
         NULL,                   // 4: TODO Table
+#endif
         ParseSection_Memory,    // 5
         ParseSection_Global,    // 6
         ParseSection_Export,    // 7

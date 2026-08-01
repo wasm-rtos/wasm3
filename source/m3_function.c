@@ -134,6 +134,19 @@ void  Function_FreeCompiledCode (IM3Function i_function)
 }
 
 
+#if d_m3HasDylink
+IM3Function  Function_Resolve  (IM3Function i_function)
+{
+    IM3Function function = i_function;
+    for (u32 depth = 0; function and function->linkedFunction
+                      and function->linkedFunction != function
+                      and depth < 64; ++depth)
+        function = function->linkedFunction;
+    return function;
+}
+#endif
+
+
 cstr_t  m3_GetFunctionName  (IM3Function i_function)
 {
     u16 numNames = 0;
@@ -230,4 +243,3 @@ u32  GetFunctionNumArgsAndLocals (IM3Function i_function)
     else
         return 0;
 }
-

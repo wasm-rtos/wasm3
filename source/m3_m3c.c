@@ -17,6 +17,9 @@
 #include "m3_compile.h"
 #include "m3_env.h"
 #include "m3_exception.h"
+#if d_m3HasDylink
+#include "m3_dylink_internal.h"
+#endif
 
 const M3Result m3Err_m3cInvalid = "invalid .m3c image";
 const M3Result m3Err_m3cIncompatible = "incompatible .m3c image";
@@ -248,6 +251,7 @@ static u32  ConfigFlags  (void)
 #ifdef d_m3NoFloatDynamic
     flags |= d_m3NoFloatDynamic ? (1u << 13) : 0;
 #endif
+    flags |= d_m3HasDylink           ? (1u << 14) : 0;
     return flags;
 }
 
@@ -424,7 +428,11 @@ static M3Result  ClassifyPointer  (IM3Module module, M3Function * functions,
 
     for (u32 i = 0; i < module->numGlobals; ++i)
     {
+#if d_m3HasDylink
+        if (pointer == m3d_GlobalValuePointer (& module->globals [i]))
+#else
         if (pointer == & module->globals [i].i64Value)
+#endif
         {
             *o_kind = c_m3cRelocGlobal;
             *o_target = i;
@@ -1064,7 +1072,11 @@ static M3Result  ApplyRelocation  (IM3Function function, code_t * code,
     case c_m3cRelocGlobal:
         if (target >= module->numGlobals)
             return m3Err_m3cInvalid;
+#if d_m3HasDylink
+        value = m3d_GlobalValuePointer (& module->globals [target]);
+#else
         value = & module->globals [target].i64Value;
+#endif
         break;
     case c_m3cRelocModule:
         if (target)

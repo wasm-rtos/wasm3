@@ -74,6 +74,9 @@ typedef struct M3Global
     u8                      type;
     bool                    imported;
     bool                    isMutable;
+# if d_m3HasDylink
+    struct M3Global *       linkedGlobal;
+# endif
 }
 M3Global;
 
@@ -113,6 +116,14 @@ typedef struct M3Module
     IM3Function *           table0;
     u32                     table0Size;
     const char*             table0ExportName;
+
+# if d_m3HasDylink
+    M3ImportInfo            table0Import;
+    u32                     table0InitSize;
+    u32                     table0MaxSize;
+    bool                    table0Imported;
+    void *                  dylink;
+# endif
 
     M3MemoryInfo            memoryInfo;
     M3ImportInfo            memoryImport;
@@ -190,6 +201,10 @@ typedef struct M3Runtime
 
 # if d_m3HasM3C
     void *                  m3cCompileContext;
+# endif
+
+# if d_m3HasDylink
+    void *                  dylinkState;
 # endif
 
     IM3Module               modules;        // linked list of imported modules

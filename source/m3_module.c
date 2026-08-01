@@ -10,6 +10,9 @@
 #if d_m3HasM3C
 #include "m3_m3c_internal.h"
 #endif
+#if d_m3HasDylink
+#include "m3_dylink_internal.h"
+#endif
 
 
 void Module_FreeFunctions (IM3Module i_module)
@@ -32,6 +35,9 @@ void  m3_FreeModule  (IM3Module i_module)
 #if d_m3HasM3C
         m3c_ReleaseModule (i_module);
 #endif
+#if d_m3HasDylink
+        m3d_ReleaseModule (i_module);
+#endif
 
         Module_FreeFunctions (i_module);
 
@@ -51,6 +57,9 @@ void  m3_FreeModule  (IM3Module i_module)
         m3_Free (i_module->table0ExportName);
 
         FreeImportInfo(&i_module->memoryImport);
+#if d_m3HasDylink
+        FreeImportInfo(&i_module->table0Import);
+#endif
 
         m3_Free (i_module);
     }
