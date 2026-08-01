@@ -54,7 +54,6 @@ typedef struct M3Function
     IM3FuncType             funcType;
 
     pc_t                    compiled;
-    struct M3Function *     linkedFunction;
 
 # if (d_m3EnableCodePageRefCounting)
     IM3CodePage *           codePageRefs;                           // array of all pages used
@@ -83,7 +82,6 @@ M3Function;
 
 void        Function_Release            (IM3Function i_function);
 void        Function_FreeCompiledCode   (IM3Function i_function);
-IM3Function Function_Resolve            (IM3Function i_function);
 
 cstr_t      GetFunctionImportModuleName (IM3Function i_function);
 cstr_t *    GetFunctionNames            (IM3Function i_function, u16 * o_numNames);

@@ -1,8 +1,8 @@
 # wasm3 runtime-control fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshot save/load/restore**, **shared linear memory between runtimes**, and **direct Wasm-to-Wasm function linking**.
+A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshot save/load/restore**, and **shared linear memory between runtimes**.
 
-This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, restoring snapshots into fresh runtimes created from the same WASM module, attaching an empty runtime to another runtime's linear memory, and binding a function import directly to an export from another module in the same runtime.
+This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, restoring snapshots into fresh runtimes created from the same WASM module, and attaching an empty runtime to another runtime's linear memory.
 
 The original wasm3 project is a high-performance WebAssembly interpreter written in C. This fork keeps wasm3 as an interpreter, but extends it with runtime-control features needed for task scheduling, runtime swapping, and memory-pressure handling in higher-level systems.
 
@@ -19,7 +19,6 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
 * Reference-counted linear-memory sharing between independently owned runtimes.
-* Direct function linking between WebAssembly modules loaded in one runtime.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -34,9 +33,6 @@ extern const char* m3Err_snapshotBufferTooSmall;
 extern const char* m3Err_sharedMemoryUnavailable;
 extern const char* m3Err_sharedMemoryInUse;
 extern const char* m3Err_sharedMemoryIncompatible;
-extern const char* m3Err_functionAlreadyLinked;
-extern const char* m3Err_functionTypeMismatch;
-extern const char* m3Err_functionRuntimeMismatch;
 
 void m3_SetFuel(IM3Runtime runtime, uint64_t fuel);
 void m3_AddFuel(IM3Runtime runtime, uint64_t fuel);
@@ -70,19 +66,6 @@ M3Result m3_ShareRuntimeMemory(
     IM3Runtime target_runtime,
     IM3Runtime source_runtime
 );
-
-M3Result m3_FindFunctionInModule(
-    IM3Function* out_function,
-    IM3Module module,
-    const char* function_name
-);
-
-M3Result m3_LinkWasmFunction(
-    IM3Module importing_module,
-    const char* import_module_name,
-    const char* import_function_name,
-    IM3Function exported_function
-);
 ```
 
 ## Shared runtime linear memory
@@ -98,50 +81,6 @@ The target runtime must not already contain a module, continuation, suspension s
 Runtime execution and memory-management calls must be externally serialized. The reference count and shared memory contents are not synchronized for concurrent access.
 
 Runtime snapshots are unsupported while the linear memory has more than one owner. A per-runtime snapshot cannot represent the live shared-memory relationship.
-
-## Same-runtime Wasm module linking
-
-`m3_LinkWasmFunction()` binds matching function imports in one loaded module directly to a defined WebAssembly export from another module loaded in the same runtime.
-
-The call remains entirely inside wasm3. It does not use a native callback, a host-side handle, or a second runtime. The caller and library therefore use the same:
-
-* Linear memory.
-* Wasm stack.
-* Fuel budget.
-* Suspension and continuation state.
-* Runtime snapshot.
-
-The modules keep their own globals, tables, exports, and start functions. If a module has a start function, link all of its dependencies first and then call `m3_RunStart()` explicitly.
-
-The importing module and exporting function must already be loaded into the same runtime. The import and export function types must match exactly. Link imports before compiling or calling the importing module.
-
-Use `m3_FindFunctionInModule()` for unambiguous export lookup when multiple loaded libraries use the same export name:
-
-```c
-IM3Function process_buffer = NULL;
-
-M3Result result = m3_FindFunctionInModule(
-    &process_buffer,
-    library_module,
-    "process_buffer"
-);
-
-if (result == m3Err_none)
-{
-    result = m3_LinkWasmFunction(
-        app_module,
-        "mylib",
-        "process_buffer",
-        process_buffer
-    );
-}
-```
-
-A typical shared-memory layout loads the application module that defines memory first, followed by library modules compiled to import a compatible memory.
-
-This API links explicit core WebAssembly function imports and exports. It is not a `dylink.0` loader: it does not perform relocations, allocate side-module data, merge tables, resolve imported globals, or automatically discover dependencies. General-purpose C/C++ shared objects still need a higher-level loader and dynamic-linking ABI.
-
-Snapshot restore requires the same modules in the same order and the same Wasm and host imports linked before `m3_LoadRuntimeSnapshot()`.
 
 ## Fuel control
 
@@ -230,7 +169,6 @@ The expected flow is:
 create runtime
 load the same WASM module
 link required host imports
-link required Wasm imports
 set fuel
 run with m3_Call()
 fuel is exhausted
@@ -241,7 +179,6 @@ destroy runtime
 create fresh runtime
 load the same WASM module
 link the same host imports again
-link the same Wasm imports again
 load snapshot
 add fuel
 resume with m3_Resume()
@@ -294,12 +231,6 @@ Host-side counters, file handles, device state, OS state, graphics state, audio 
 `m3Err_sharedMemoryInUse` is returned when the target runtime is not empty.
 
 `m3Err_sharedMemoryIncompatible` is returned when a module defines its own memory on an attached runtime or imports memory with incompatible limits.
-
-`m3Err_functionAlreadyLinked` is returned when a Wasm import is already bound to a different Wasm function or to a raw host function.
-
-`m3Err_functionTypeMismatch` is returned when the import and export function types differ.
-
-`m3Err_functionRuntimeMismatch` is returned when the importing module and exported function belong to different runtimes.
 
 ## Intended use in microwasm-os
 

@@ -167,9 +167,6 @@ d_m3ErrorConst  (moduleNotLinked,               "attempting to use module that i
 d_m3ErrorConst  (moduleAlreadyLinked,           "attempting to bind module to multiple runtimes")
 d_m3ErrorConst  (functionLookupFailed,          "function lookup failed")
 d_m3ErrorConst  (functionImportMissing,         "missing imported function")
-d_m3ErrorConst  (functionAlreadyLinked,         "function import is already linked")
-d_m3ErrorConst  (functionTypeMismatch,          "function import and export types do not match")
-d_m3ErrorConst  (functionRuntimeMismatch,       "function import and export use different runtimes")
 
 d_m3ErrorConst  (malformedFunctionSignature,    "malformed function signature")
 
@@ -308,13 +305,6 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
                                                      M3RawCall              i_function,
                                                      const void *           i_userdata);
 
-    // Link matching function imports directly to a WebAssembly export loaded
-    // in the same runtime. The export must be a defined Wasm function.
-    M3Result            m3_LinkWasmFunction         (IM3Module              io_module,
-                                                     const char * const     i_moduleName,
-                                                     const char * const     i_functionName,
-                                                     IM3Function            i_exportedFunction);
-
     const char*         m3_GetModuleName            (IM3Module i_module);
     void                m3_SetModuleName            (IM3Module i_module, const char* name);
     IM3Runtime          m3_GetModuleRuntime         (IM3Module i_module);
@@ -341,9 +331,6 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     // o_function is valid during the lifetime of the originating runtime
     M3Result            m3_FindFunction             (IM3Function *          o_function,
                                                      IM3Runtime             i_runtime,
-                                                     const char * const     i_functionName);
-    M3Result            m3_FindFunctionInModule     (IM3Function *          o_function,
-                                                     IM3Module              i_module,
                                                      const char * const     i_functionName);
     M3Result            m3_GetTableFunction         (IM3Function *          o_function,
                                                      IM3Module              i_module,

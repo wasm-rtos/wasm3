@@ -690,8 +690,7 @@ d_m3Op  (CallIndirect)
 
     if (M3_LIKELY(tableIndex < module->table0Size))
     {
-        IM3Function function = Function_Resolve (
-            module->table0 [tableIndex]);
+        IM3Function function = module->table0 [tableIndex];
 
         if (M3_LIKELY(function))
         {
