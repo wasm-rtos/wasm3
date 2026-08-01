@@ -139,6 +139,18 @@
 #   define d_m3HasFloat                         1       // implement floating point ops
 # endif
 
+// Optional persistent wasm3 metacode cache (.m3c). The implementation is
+// completely compiled out unless explicitly enabled by the embedding project.
+# ifndef d_m3HasM3C
+#   define d_m3HasM3C                           0
+# endif
+
+// Bump this whenever the layout or semantics of emitted wasm3 metacode change.
+// .m3c images are deliberately tied to a compatible wasm3 build/target.
+# ifndef d_m3M3CAbiVersion
+#   define d_m3M3CAbiVersion                    1
+# endif
+
 #if !d_m3HasFloat && !defined(d_m3NoFloatDynamic)
 #   define d_m3NoFloatDynamic                   1       // if no floats, do not fail until flops are actually executed
 #endif

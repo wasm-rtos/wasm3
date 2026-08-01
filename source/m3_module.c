@@ -7,6 +7,9 @@
 
 #include "m3_env.h"
 #include "m3_exception.h"
+#if d_m3HasM3C
+#include "m3_m3c_internal.h"
+#endif
 
 
 void Module_FreeFunctions (IM3Module i_module)
@@ -25,6 +28,10 @@ void  m3_FreeModule  (IM3Module i_module)
     {
         m3log (module, "freeing module: %s (funcs: %d; segments: %d)",
                i_module->name, i_module->numFunctions, i_module->numDataSegments);
+
+#if d_m3HasM3C
+        m3c_ReleaseModule (i_module);
+#endif
 
         Module_FreeFunctions (i_module);
 
@@ -172,4 +179,3 @@ IM3Runtime  m3_GetModuleRuntime  (IM3Module i_module)
 {
     return i_module ? i_module->runtime : NULL;
 }
-
