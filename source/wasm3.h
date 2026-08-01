@@ -143,9 +143,6 @@ d_m3ErrorConst  (runtimeSuspended,              "runtime is suspended")
 d_m3ErrorConst  (snapshotInvalid,              "runtime snapshot is invalid")
 d_m3ErrorConst  (snapshotUnsupported,          "runtime snapshot operation is unsupported")
 d_m3ErrorConst  (snapshotBufferTooSmall,       "runtime snapshot buffer is too small")
-d_m3ErrorConst  (sharedMemoryUnavailable,      "runtime linear memory is not available for sharing")
-d_m3ErrorConst  (sharedMemoryInUse,            "target runtime is not empty")
-d_m3ErrorConst  (sharedMemoryIncompatible,     "module memory is incompatible with shared runtime memory")
 
 // parse errors
 d_m3ErrorConst  (incompatibleWasmVersion,       "incompatible Wasm binary version")
@@ -231,14 +228,6 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
                                                      void *                 i_userdata);
 
     void                m3_FreeRuntime              (IM3Runtime             i_runtime);
-
-    // Make an empty target runtime use the source runtime's linear memory.
-    // The source must already have initialized memory. The target retains the
-    // allocation and may outlive the source. Modules subsequently loaded into
-    // the target must import a compatible memory. Runtime execution and memory
-    // sharing must be externally serialized, like other wasm3 runtime calls.
-    M3Result            m3_ShareRuntimeMemory       (IM3Runtime             io_targetRuntime,
-                                                     IM3Runtime             i_sourceRuntime);
 
     // Wasm currently only supports one memory region. i_memoryIndex should be zero.
     uint8_t *           m3_GetMemory                (IM3Runtime             i_runtime,

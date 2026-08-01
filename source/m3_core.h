@@ -131,6 +131,8 @@ typedef code_t const * /*__restrict__*/     pc_t;
 
 typedef struct M3MemoryHeader
 {
+    IM3Runtime      runtime;
+    void *          maxStack;
     size_t          length;
 }
 M3MemoryHeader;
