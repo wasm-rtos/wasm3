@@ -107,6 +107,19 @@ non-overlapping linear stack. Program exports are scoped to their program, so
 several applications may use the same `_start` or `app_main` name. Dependency
 exports are resident and visible to every program.
 
+Programs can join and leave a running group through `m3_DylinkAddProgram()`
+and `m3_DylinkRemoveProgram()`. New `NEEDED` libraries are resolved only when
+the first program that needs them is added, then remain resident with their
+globals and linear-memory state. Removing a program releases its module,
+native stack, continuations, table ranges, static-data range, linear stack, and
+private heap range. Shared linear memory cannot shrink, so released address
+ranges are recycled by later programs instead.
+
+The special stack globals live in the link group rather than in the first
+program module. Context pointers therefore stay valid when the internal
+context directory grows, and removing the program that originally created the
+group does not invalidate the remaining applications.
+
 The module resolver returns an already parsed `IM3Module`, so storage remains a host decision. A resolver may return a module from `m3_ParseModule()` or `m3_ParseM3C()`; `.wasm` and `.m3c` modules can therefore be mixed in one link group.
 
 ```c
@@ -154,6 +167,11 @@ Snapshots made through the legacy runtime API describe the currently active
 context together with the entire shared memory and all module globals; an
 embedder that needs task-local snapshots must define group-level snapshot
 semantics instead of treating shared library state as private.
+
+Before removing a program, the embedder must unregister any callback or Wasm
+function pointer that a resident library retained from that program. The
+linker clears the removed program's own table ranges, but it cannot discover a
+function pointer copied into arbitrary library state.
 
 In a multi-program group, resident libraries cannot bind imports directly to
 one program's private exports because there is no single correct program
