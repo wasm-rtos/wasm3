@@ -193,6 +193,10 @@ Fuel accounting runs in one shared metacode dispatcher instead of being
 inlined into every operation handler. This keeps the compiled interpreter
 smaller without changing fuel, suspension, or resume semantics.
 
+Fuel/resume support is compiled in by default. Flash-constrained ATmega1284P
+builds default to `d_m3HasFuel=0`; define it explicitly to override that
+platform default.
+
 If wasm3 can capture the current continuation, the runtime becomes suspended and can later be resumed with `m3_Resume()`.
 
 Use `m3_SetFuel()` to set a new fuel value.
