@@ -139,10 +139,15 @@
 #   define d_m3HasFloat                         1       // implement floating point ops
 # endif
 
-// Runtime snapshots are enabled by default, but small embedded targets may
-// compile the implementation out while retaining unsupported API stubs.
+// Runtime snapshots are enabled by default. AVR builds default to disabled
+// because the implementation does not fit on the supported flash-constrained
+// boards; either default can be overridden by defining d_m3HasSnapshot.
 # ifndef d_m3HasSnapshot
+#  if defined(__AVR__)
+#   define d_m3HasSnapshot                      0
+#  else
 #   define d_m3HasSnapshot                      1
+#  endif
 # endif
 
 // Optional persistent wasm3 metacode cache (.m3c). The implementation is

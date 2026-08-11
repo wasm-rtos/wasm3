@@ -107,10 +107,10 @@ m3ret_t  FuelPushFrame  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHead
 }
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-M3_FUEL_DISPATCH_ATTR
+M3_NOINLINE
 m3ret_t vectorcall FuelDispatch (d_m3OpSig, cstr_t i_operationName)
 # else
-M3_FUEL_DISPATCH_ATTR
+M3_NOINLINE
 m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 # endif
 {

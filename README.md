@@ -217,10 +217,10 @@ Calling `m3_Call()` on a suspended runtime returns `m3Err_runtimeSuspended`.
 
 ## Runtime snapshots
 
-Snapshot support is enabled by default. Small embedded builds can define
-`d_m3HasSnapshot=0`, or configure CMake with `BUILD_SNAPSHOT=OFF`, to compile
-out the implementation; the public snapshot functions then return
-`m3Err_snapshotUnsupported`.
+Snapshot support is enabled by default, except on flash-constrained AVR targets.
+Define `d_m3HasSnapshot` explicitly to override the platform default. CMake
+builds can use `BUILD_SNAPSHOT=OFF` to compile the implementation out. The
+public snapshot functions then return `m3Err_snapshotUnsupported`.
 
 Snapshots can only be saved from suspended runtimes.
 
