@@ -236,11 +236,13 @@ void *  _FreeModule  (IM3Module i_module, void * i_info)
 
 void  Runtime_Release  (IM3Runtime i_runtime)
 {
-    ForEachModule (i_runtime, _FreeModule, NULL);                   d_m3Assert (i_runtime->numActiveCodePages == 0);
-
 #if d_m3HasDylink
+    // Dylink execution contexts reference module globals (notably the shared
+    // stack pointer), so detach them before module ownership is released.
     m3d_ReleaseRuntime (i_runtime);
 #endif
+
+    ForEachModule (i_runtime, _FreeModule, NULL);                   d_m3Assert (i_runtime->numActiveCodePages == 0);
 
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesOpen);
     Environment_ReleaseCodePages (i_runtime->environment, i_runtime->pagesFull);
@@ -874,6 +876,42 @@ _           (CompileFunction (function))
 
     * o_function = function;
 
+    return result;
+}
+
+
+M3Result  m3_FindFunctionInModule  (IM3Function * o_function,
+                                     IM3Module i_module,
+                                     const char * const i_functionName)
+{
+    M3Result result = m3Err_none;
+    IM3Function function = NULL;
+
+    if (not o_function or not i_module or not i_functionName)
+        return m3Err_functionLookupFailed;
+    if (not i_module->runtime)
+        return m3Err_moduleNotLinked;
+
+    function = (IM3Function) v_FindFunction (i_module,
+                                             (void *) i_functionName);
+#if d_m3HasDylink
+    function = m3d_ResolveFunction (function);
+#endif
+    if (function)
+    {
+        if (not function->compiled)
+        {
+_           (CompileFunction (function))
+        }
+    }
+    else
+        _throw (ErrorModule (m3Err_functionLookupFailed, i_module,
+                             "'%s'", i_functionName));
+
+_catch:
+    if (result)
+        function = NULL;
+    *o_function = function;
     return result;
 }
 

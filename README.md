@@ -19,7 +19,8 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
 * Optional, storage-agnostic `.m3c` images with relocatable wasm3 metacode.
-* Optional `dylink.0` link groups with shared linear memory and a shared function table.
+* Optional `dylink.0` link groups with resident libraries, shared linear memory,
+  and per-program execution contexts.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -99,6 +100,13 @@ Enable this subsystem with `d_m3HasDylink=1`, or with `BUILD_DYLINK=ON` when usi
 
 `m3_DylinkLoad()` loads a position-independent main module and its `NEEDED` libraries as one link group. The implementation follows the standard `dylink.0` conventions used by LLVM: every module receives an aligned `__memory_base` and `__table_base`, while all modules share one linear memory, function table, and `__stack_pointer`. It resolves direct function imports, `GOT.func`, and `GOT.mem`, then runs data relocations and constructors in dependency order.
 
+`m3_DylinkLoadGroup()` extends that model to several independent PIE programs.
+Each dependency is resolved and instantiated once for the whole group, while
+each program receives its own native wasm3 stack, fuel/continuation state, and
+non-overlapping linear stack. Program exports are scoped to their program, so
+several applications may use the same `_start` or `app_main` name. Dependency
+exports are resident and visible to every program.
+
 The module resolver returns an already parsed `IM3Module`, so storage remains a host decision. A resolver may return a module from `m3_ParseModule()` or `m3_ParseM3C()`; `.wasm` and `.m3c` modules can therefore be mixed in one link group.
 
 ```c
@@ -121,6 +129,37 @@ M3DylinkOptions options = {
 M3Result result = m3_DylinkLoad(runtime, app_module, "watch-app",
                                 &options);
 ```
+
+For a resident multi-program group, pass an array of `M3DylinkProgram` values
+and keep the returned contexts. Activate the matching context before using the
+regular call, result, fuel, resume, or userdata APIs:
+
+```c
+M3DylinkProgram programs[] = {
+    { .name = "face-a", .module = app_a, .userdata = task_a },
+    { .name = "face-b", .module = app_b, .userdata = task_b },
+};
+IM3DylinkContext contexts[2];
+
+M3Result result = m3_DylinkLoadGroup(runtime, programs, 2,
+                                     &options, contexts);
+if (!result) {
+    result = m3_DylinkActivateContext(contexts[0]);
+    // m3_SetFuel(), m3_Call(), m3_Resume(), m3_GetResults(), ...
+}
+```
+
+Context switching and all execution in a group must be externally serialized.
+Snapshots made through the legacy runtime API describe the currently active
+context together with the entire shared memory and all module globals; an
+embedder that needs task-local snapshots must define group-level snapshot
+semantics instead of treating shared library state as private.
+
+In a multi-program group, resident libraries cannot bind imports directly to
+one program's private exports because there is no single correct program
+instance. Pass program-specific callbacks as Wasm function pointers instead.
+Single-program `m3_DylinkLoad()` groups keep the usual main-to-side-module
+symbol visibility.
 
 Pointers produced by C remain 32-bit offsets in the shared linear memory. This lets a library return `const char *`, accept arrays or structs, and receive Wasm function pointers without host-side pointer wrappers.
 
