@@ -82,6 +82,19 @@
 #  endif
 # endif
 
+// A separate dispatcher saves native flash, but WebAssembly engines cannot
+// universally eliminate the extra tail-call frame. Inline it for wasm builds
+// so long-running guests do not consume one host frame per instruction.
+# if defined(__wasm__)
+#  if M3_COMPILER_HAS_ATTRIBUTE(always_inline)
+#   define M3_FUEL_DISPATCH_ATTR inline __attribute__((always_inline))
+#  else
+#   define M3_FUEL_DISPATCH_ATTR inline
+#  endif
+# else
+#  define M3_FUEL_DISPATCH_ATTR M3_NOINLINE
+# endif
+
 # if !defined(M3_HAS_TAIL_CALL)
 #  if defined(__EMSCRIPTEN__)
 #   define M3_HAS_TAIL_CALL 0
