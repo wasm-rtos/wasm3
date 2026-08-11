@@ -139,6 +139,12 @@
 #   define d_m3HasFloat                         1       // implement floating point ops
 # endif
 
+// Runtime snapshots are enabled by default, but small embedded targets may
+// compile the implementation out while retaining unsupported API stubs.
+# ifndef d_m3HasSnapshot
+#   define d_m3HasSnapshot                      1
+# endif
+
 // Optional persistent wasm3 metacode cache (.m3c). The implementation is
 // completely compiled out unless explicitly enabled by the embedding project.
 # ifndef d_m3HasM3C

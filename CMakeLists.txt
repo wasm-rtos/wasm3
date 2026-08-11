@@ -27,6 +27,7 @@ set_property(CACHE BUILD_WASI PROPERTY STRINGS none simple uvwasi metawasi)
 
 option(BUILD_NATIVE "Build with machine-specific optimisations" ON)
 option(BUILD_FUEL_TEST "Build the fuel/resume regression test" OFF)
+option(BUILD_SNAPSHOT "Build runtime snapshot support" ON)
 option(BUILD_M3C "Build optional .m3c persistent metacode support" OFF)
 option(BUILD_DYLINK "Build optional dylink.0 runtime linker support" OFF)
 

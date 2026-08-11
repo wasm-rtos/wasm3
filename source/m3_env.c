@@ -892,8 +892,7 @@ M3Result  m3_FindFunctionInModule  (IM3Function * o_function,
     if (not i_module->runtime)
         return m3Err_moduleNotLinked;
 
-    function = (IM3Function) v_FindFunction (i_module,
-                                             (void *) i_functionName);
+    function = (IM3Function) v_FindFunction (i_module, i_functionName);
 #if d_m3HasDylink
     function = m3d_ResolveFunction (function);
 #endif
@@ -1494,6 +1493,8 @@ M3BacktraceInfo *  m3_GetBacktrace  (IM3Runtime i_runtime)
 }
 
 
+#if d_m3HasSnapshot
+
 // Snapshot v1 is a process-local, same-binary/same-module continuation format.
 // It avoids serializing raw stack, memory, function, and code pointers: continuation PCs
 // are encoded as function identities plus offsets; SP is a stack-slot offset; memory
@@ -1700,3 +1701,31 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
     runtime->numContinuationFrames = h.frameCount; runtime->suspendedFunction = &sm->functions[h.suspendedFunctionIndex]; runtime->lastCalled = NULL;
     return m3Err_none;
 }
+
+#else
+
+M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
+{
+    (void) runtime;
+    (void) out_size;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t buffer_size, uint32_t * out_size)
+{
+    (void) runtime;
+    (void) buffer;
+    (void) buffer_size;
+    (void) out_size;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uint32_t buffer_size)
+{
+    (void) runtime;
+    (void) buffer;
+    (void) buffer_size;
+    return m3Err_snapshotUnsupported;
+}
+
+#endif
