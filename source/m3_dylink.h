@@ -49,6 +49,9 @@ typedef struct M3DylinkProgram
     uint32_t                    nativeStackSize; // 0 uses the runtime stack size
     uint32_t                    linearStackSize; // 0 uses options/default
     void *                      userdata;
+    // For programs added later, 0 derives a private heap from the module's
+    // declared minimum memory after static data and the linear stack.
+    uint32_t                    linearHeapSize;
 }
 M3DylinkProgram;
 
@@ -76,6 +79,23 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
                                 uint32_t numPrograms,
                                 const M3DylinkOptions * options,
                                 IM3DylinkContext * outContexts);
+
+// Add a PIE program to a group previously created by m3_DylinkLoadGroup.
+// New dependencies are resolved lazily and become resident for the remaining
+// lifetime of the group. The returned context has a stable address until it is
+// removed or the runtime is freed.
+M3Result  m3_DylinkAddProgram  (IM3Runtime runtime,
+                                 const M3DylinkProgram * program,
+                                 const M3DylinkOptions * options,
+                                 IM3DylinkContext * outContext);
+
+// Detach one program context. Resident dependencies and their shared state are
+// kept alive. The context pointer becomes invalid after this call succeeds.
+// The embedder must first unregister callbacks or table pointers retained by a
+// shared library that refer to the program being removed.
+M3Result  m3_DylinkRemoveProgram  (IM3DylinkContext context);
+
+uint32_t  m3_DylinkGetProgramCount  (IM3Runtime runtime);
 
 // Select a program's execution state before using the regular m3_Call,
 // m3_Resume, fuel, result, or userdata APIs on the group's runtime.

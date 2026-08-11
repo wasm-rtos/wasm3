@@ -61,13 +61,25 @@ typedef struct M3DylinkObject
     cstr_t name;
     IM3Module module;
     u32 memoryBase;
+    u32 memorySize;
     u32 tableBase;
+    u32 tableSize;
+    u32 exportTableBase;
+    u32 exportTableSize;
     u32 programIndex;
     u8 visit;
 }
 M3DylinkObject;
 
 typedef struct M3DylinkState M3DylinkState;
+
+typedef struct M3DylinkRange
+{
+    u32 base;
+    u32 size;
+    struct M3DylinkRange * next;
+}
+M3DylinkRange;
 
 struct M3DylinkContext
 {
@@ -92,6 +104,10 @@ struct M3DylinkContext
     u32 linearStackLow;
     u32 linearStackHigh;
     u32 linearStackPointer;
+    u32 linearHeapLow;
+    u32 linearHeapHigh;
+    u32 programIndex;
+    bool ownsLinearHeap;
 
 #if d_m3EnableStrace >= 2
     u32 callDepth;
@@ -111,17 +127,33 @@ struct M3DylinkState
     IM3Function * table;
     u32 tableSize;
 
+    M3Global stackPointerStorage;
+    M3Global stackLowStorage;
+    M3Global stackHighStorage;
     M3Global * stackPointer;
     M3Global * stackLowGlobal;
     M3Global * stackHighGlobal;
+    bool stackLowConfigured;
+    bool stackHighConfigured;
     u32 stackLow;
     u32 stackHigh;
     u32 heapBase;
     u32 heapEnd;
+    u32 memoryCursor;
+    u32 tableCursor;
+    u32 maximumTable;
+    M3DylinkRange * freeMemoryRanges;
+    M3DylinkRange * freeTableRanges;
 
-    struct M3DylinkContext * contexts;
+    IM3DylinkContext * contexts;
     u32 numContexts;
+    u32 contextCapacity;
+    u32 numActiveContexts;
     IM3DylinkContext activeContext;
+    u32 originStackSize;
+    u32 originNumStackSlots;
+    void * originUserdata;
+    bool dynamicPrograms;
 };
 
 
@@ -328,6 +360,41 @@ static void  SaveActiveContext  (M3DylinkState * state)
 }
 
 
+static void  ParkRuntime  (M3DylinkState * state)
+{
+    if (not state or not state->runtime)
+        return;
+    SaveActiveContext (state);
+    IM3Runtime runtime = state->runtime;
+    runtime->stack = runtime->originStack;
+    runtime->stackSize = state->originStackSize;
+    runtime->numStackSlots = state->originNumStackSlots;
+    runtime->fuel = 0;
+    runtime->fuelEnabled = false;
+    runtime->suspended = false;
+    runtime->suspendedFunction = NULL;
+    runtime->lastCalled = NULL;
+    runtime->continuationFrames = NULL;
+    runtime->numContinuationFrames = 0;
+    runtime->maxContinuationFrames = 0;
+    runtime->userdata = state->originUserdata;
+#if d_m3EnableStrace >= 2
+    runtime->callDepth = 0;
+#endif
+#if d_m3RecordBacktraces
+    M3_INIT (runtime->backtrace);
+#endif
+    if (runtime->memory.mallocated)
+    {
+        runtime->memory.mallocated->runtime = runtime;
+        runtime->memory.mallocated->maxStack =
+            (m3slot_t *) runtime->stack + runtime->numStackSlots;
+    }
+    state->activeContext = NULL;
+    m3_ResetErrorInfo (runtime);
+}
+
+
 static M3Result  ActivateContext  (IM3DylinkContext context)
 {
     if (not context or not context->state or not context->state->runtime)
@@ -420,23 +487,39 @@ static void  FreeContextBacktrace  (IM3DylinkContext context)
 #endif
 
 
+static void  FreeContextStorage  (IM3DylinkContext context)
+{
+    if (not context)
+        return;
+#if d_m3RecordBacktraces
+    FreeContextBacktrace (context);
+#endif
+    m3_Free (context->continuationFrames);
+    if (context->ownsStack)
+        m3_Free (context->stack);
+    m3_Free (context);
+}
+
+
+static void  FreeRangeList  (M3DylinkRange * range)
+{
+    while (range)
+    {
+        M3DylinkRange * next = range->next;
+        m3_Free (range);
+        range = next;
+    }
+}
+
+
 void  m3d_ReleaseRuntime  (IM3Runtime runtime)
 {
     if (not runtime or not runtime->dylinkState)
         return;
     M3DylinkState * state = (M3DylinkState *) runtime->dylinkState;
-    SaveActiveContext (state);
-    if (state->numContexts)
-        (void) ActivateContext (& state->contexts [0]);
-    for (u32 i = 1; i < state->numContexts; ++i)
-    {
-#if d_m3RecordBacktraces
-        FreeContextBacktrace (& state->contexts [i]);
-#endif
-        m3_Free (state->contexts [i].continuationFrames);
-        if (state->contexts [i].ownsStack)
-            m3_Free (state->contexts [i].stack);
-    }
+    ParkRuntime (state);
+    for (u32 i = 0; i < state->numContexts; ++i)
+        FreeContextStorage (state->contexts [i]);
     for (u32 i = 0; i < state->numObjects; ++i)
     {
         if (state->objects [i].programIndex == UINT32_MAX
@@ -448,6 +531,8 @@ void  m3d_ReleaseRuntime  (IM3Runtime runtime)
     m3_Free (state->objects);
     m3_Free (state->table);
     m3_Free (state->contexts);
+    FreeRangeList (state->freeMemoryRanges);
+    FreeRangeList (state->freeTableRanges);
     m3_Free (state);
     runtime->dylinkState = NULL;
 }
@@ -573,6 +658,7 @@ static M3Result  AddObject  (M3DylinkState * state, const char * name,
     if (not copy)
         return m3Err_mallocFailed;
     u32 index = state->numObjects++;
+    M3_INIT (state->objects [index]);
     state->objects [index].name = copy;
     state->objects [index].module = module;
     state->objects [index].programIndex = programIndex;
@@ -640,6 +726,30 @@ static void  TopologicalVisit  (M3DylinkState * state, u32 index,
         i32 dependency = FindDependencyIndex (state, metadata->needed [i]);
         if (dependency >= 0)
             TopologicalVisit (state, (u32) dependency, order, io_count);
+    }
+    object = & state->objects [index];
+    object->visit = 2;
+    order [(*io_count)++] = index;
+}
+
+
+static void  TopologicalVisitNew  (M3DylinkState * state, u32 index,
+                                   u32 firstObject, u32 * order,
+                                   u32 * io_count)
+{
+    if (index < firstObject)
+        return;
+    M3DylinkObject * object = & state->objects [index];
+    if (object->visit == 2 or object->visit == 1)
+        return;
+    object->visit = 1;
+    M3DylinkMetadata * metadata = (M3DylinkMetadata *) object->module->dylink;
+    for (u32 i = 0; i < metadata->numNeeded; ++i)
+    {
+        i32 dependency = FindDependencyIndex (state, metadata->needed [i]);
+        if (dependency >= 0)
+            TopologicalVisitNew (state, (u32) dependency, firstObject,
+                                 order, io_count);
     }
     object = & state->objects [index];
     object->visit = 2;
@@ -727,6 +837,112 @@ static bool  AllocateAligned  (u32 * io_cursor, u32 alignmentLog,
 }
 
 
+static bool  AlignValue  (u32 value, u32 alignmentLog, u32 * o_value)
+{
+    if (alignmentLog >= 32)
+        return false;
+    u32 mask = alignmentLog ? ((1u << alignmentLog) - 1u) : 0;
+    if (value > UINT32_MAX - mask)
+        return false;
+    *o_value = (value + mask) & ~mask;
+    return true;
+}
+
+
+static bool  AllocateRange  (M3DylinkRange ** io_freeRanges,
+                             u32 * io_cursor, u32 alignmentLog,
+                             u32 size, u32 * o_base)
+{
+    if (not size)
+        return AlignValue (*io_cursor, alignmentLog, o_base);
+
+    M3DylinkRange ** link = io_freeRanges;
+    while (*link)
+    {
+        M3DylinkRange * range = *link;
+        u32 base;
+        if (AlignValue (range->base, alignmentLog, & base)
+            and base >= range->base
+            and base - range->base <= range->size
+            and size <= range->size - (base - range->base))
+        {
+            u32 prefix = base - range->base;
+            u32 suffixBase = base + size;
+            u32 suffix = range->size - prefix - size;
+            M3DylinkRange * suffixRange = NULL;
+            if (prefix and suffix)
+            {
+                suffixRange = m3_AllocStruct (M3DylinkRange);
+                if (not suffixRange)
+                {
+                    link = & range->next;
+                    continue;
+                }
+                suffixRange->base = suffixBase;
+                suffixRange->size = suffix;
+                suffixRange->next = range->next;
+            }
+            if (prefix)
+            {
+                range->size = prefix;
+                if (suffixRange)
+                    range->next = suffixRange;
+            }
+            else if (suffix)
+            {
+                range->base = suffixBase;
+                range->size = suffix;
+            }
+            else
+            {
+                *link = range->next;
+                m3_Free (range);
+            }
+            *o_base = base;
+            return true;
+        }
+        link = & range->next;
+    }
+    return AllocateAligned (io_cursor, alignmentLog, size, o_base);
+}
+
+
+static void  FreeRange  (M3DylinkRange ** io_freeRanges,
+                         u32 base, u32 size)
+{
+    if (not size)
+        return;
+    M3DylinkRange ** link = io_freeRanges;
+    while (*link and (*link)->base < base)
+        link = & (*link)->next;
+
+    M3DylinkRange * range = m3_AllocStruct (M3DylinkRange);
+    if (not range)
+        return;
+    range->base = base;
+    range->size = size;
+    range->next = *link;
+    *link = range;
+
+    M3DylinkRange * previous = NULL;
+    M3DylinkRange * current = *io_freeRanges;
+    while (current)
+    {
+        if (previous and previous->base <= UINT32_MAX - previous->size
+            and previous->base + previous->size == current->base)
+        {
+            previous->size += current->size;
+            previous->next = current->next;
+            m3_Free (current);
+            current = previous->next;
+            continue;
+        }
+        previous = current;
+        current = current->next;
+    }
+}
+
+
 static bool  FunctionIsExported  (IM3Function function, const char * name)
 {
     return function->export_name and NamesEqual (function->export_name, name);
@@ -742,7 +958,7 @@ static bool  ObjectIsVisible  (const M3DylinkState * state,
     if (candidate->programIndex == UINT32_MAX)
         return true;
     if (requester->programIndex == UINT32_MAX)
-        return state->numContexts == 1;
+        return not state->dynamicPrograms and state->numActiveContexts == 1;
     return requester->programIndex != UINT32_MAX
         and requester->programIndex == candidate->programIndex;
 }
@@ -846,9 +1062,9 @@ static bool  IsSpecialGlobal  (M3Global * global)
 }
 
 
-static M3Result  LinkFunctions  (M3DylinkState * state)
+static M3Result  LinkFunctionsFrom  (M3DylinkState * state, u32 firstObject)
 {
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
         M3DylinkObject * object = & state->objects [oi];
         IM3Module module = object->module;
@@ -873,32 +1089,11 @@ static M3Result  LinkFunctions  (M3DylinkState * state)
 }
 
 
-static M3Result  LinkGlobalsAndBases  (M3DylinkState * state)
+static M3Result  LinkGlobalsAndBasesFrom  (M3DylinkState * state,
+                                           u32 firstObject)
 {
-    M3Global * stackPointer = NULL;
-    for (u32 oi = 0; oi < state->numObjects and not stackPointer; ++oi)
-    {
-        IM3Module module = state->objects [oi].module;
-        for (u32 gi = 0; gi < module->numGlobals; ++gi)
-        {
-            M3Global * global = & module->globals [gi];
-            if (global->imported
-                and NamesEqual (global->import.moduleUtf8, "env")
-                and NamesEqual (global->import.fieldUtf8, "__stack_pointer"))
-            {
-                if (global->type != c_m3Type_i32 or not global->isMutable)
-                    return m3Err_dylinkTypeMismatch;
-                stackPointer = global;
-                break;
-            }
-        }
-    }
-    if (not stackPointer)
-        return m3Err_dylinkUnresolvedSymbol;
-    stackPointer->i32Value = (i32) state->stackHigh;
-    state->stackPointer = stackPointer;
-
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    bool foundStackPointer = firstObject != 0;
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
         M3DylinkObject * object = & state->objects [oi];
         IM3Module module = object->module;
@@ -921,49 +1116,61 @@ static M3Result  LinkGlobalsAndBases  (M3DylinkState * state)
             else if (NamesEqual (importModule, "env")
                      and NamesEqual (name, "__stack_pointer"))
             {
-                if (not global->isMutable)
+                if (not global->isMutable or global->type != c_m3Type_i32)
                     return m3Err_dylinkTypeMismatch;
-                if (global != stackPointer)
-                    global->linkedGlobal = stackPointer;
+                global->linkedGlobal = state->stackPointer;
+                foundStackPointer = true;
             }
             else if (NamesEqual (importModule, "env")
                      and NamesEqual (name, "__stack_low"))
             {
-                if (not state->stackLowGlobal)
+                if (not state->stackLowConfigured)
                 {
-                    state->stackLowGlobal = global;
-                    global->i32Value = (i32) state->stackLow;
+                    state->stackLowStorage.type = global->type;
+                    state->stackLowStorage.isMutable = global->isMutable;
+                    state->stackLowConfigured = true;
                 }
-                else
-                {
-                    if (global->isMutable !=
-                        state->stackLowGlobal->isMutable)
-                        return m3Err_dylinkTypeMismatch;
-                    global->linkedGlobal = state->stackLowGlobal;
-                }
+                else if (global->type != state->stackLowStorage.type
+                         or global->isMutable !=
+                            state->stackLowStorage.isMutable)
+                    return m3Err_dylinkTypeMismatch;
+                global->linkedGlobal = state->stackLowGlobal;
             }
             else if (NamesEqual (importModule, "env")
                      and NamesEqual (name, "__stack_high"))
             {
-                if (not state->stackHighGlobal)
+                if (not state->stackHighConfigured)
                 {
-                    state->stackHighGlobal = global;
-                    global->i32Value = (i32) state->stackHigh;
+                    state->stackHighStorage.type = global->type;
+                    state->stackHighStorage.isMutable = global->isMutable;
+                    state->stackHighConfigured = true;
                 }
-                else
-                {
-                    if (global->isMutable !=
-                        state->stackHighGlobal->isMutable)
-                        return m3Err_dylinkTypeMismatch;
-                    global->linkedGlobal = state->stackHighGlobal;
-                }
+                else if (global->type != state->stackHighStorage.type
+                         or global->isMutable !=
+                            state->stackHighStorage.isMutable)
+                    return m3Err_dylinkTypeMismatch;
+                global->linkedGlobal = state->stackHighGlobal;
             }
             else if (NamesEqual (importModule, "env")
                      and NamesEqual (name, "__heap_base"))
-                global->i32Value = (i32) state->heapBase;
+            {
+                IM3DylinkContext context =
+                    object->programIndex != UINT32_MAX
+                    and object->programIndex < state->numContexts
+                        ? state->contexts [object->programIndex] : NULL;
+                global->i32Value = (i32) (context
+                    ? context->linearHeapLow : state->heapBase);
+            }
             else if (NamesEqual (importModule, "env")
                      and NamesEqual (name, "__heap_end"))
-                global->i32Value = (i32) state->heapEnd;
+            {
+                IM3DylinkContext context =
+                    object->programIndex != UINT32_MAX
+                    and object->programIndex < state->numContexts
+                        ? state->contexts [object->programIndex] : NULL;
+                global->i32Value = (i32) (context
+                    ? context->linearHeapHigh : state->heapEnd);
+            }
             else if (NamesEqual (importModule, "GOT.func")
                      or NamesEqual (importModule, "GOT.mem"))
                 continue;
@@ -984,14 +1191,15 @@ static M3Result  LinkGlobalsAndBases  (M3DylinkState * state)
             }
         }
     }
-    return m3Err_none;
+    return foundStackPointer ? m3Err_none : m3Err_dylinkUnresolvedSymbol;
 }
 
 
-static u32  CountFunctionExports  (M3DylinkState * state)
+static u32  CountFunctionExportsFrom  (M3DylinkState * state,
+                                       u32 firstObject)
 {
     u32 count = 0;
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
         M3DylinkObject * object = & state->objects [oi];
         IM3Module module = object->module;
@@ -1013,12 +1221,15 @@ static i32  FindTableFunction  (M3DylinkState * state, IM3Function function)
 }
 
 
-static M3Result  FillExportTable  (M3DylinkState * state, u32 firstExport)
+static M3Result  FillExportTableFrom  (M3DylinkState * state,
+                                       u32 firstObject, u32 firstExport)
 {
     u32 cursor = firstExport;
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
-        IM3Module module = state->objects [oi].module;
+        M3DylinkObject * object = & state->objects [oi];
+        IM3Module module = object->module;
+        object->exportTableBase = cursor;
         for (u32 fi = 0; fi < module->numFunctions; ++fi)
         {
             IM3Function function = & module->functions [fi];
@@ -1033,14 +1244,16 @@ static M3Result  FillExportTable  (M3DylinkState * state, u32 firstExport)
                 return m3Err_dylinkUnsupported;
             state->table [cursor++] = function;
         }
+        object->exportTableSize = cursor - object->exportTableBase;
     }
     return m3Err_none;
 }
 
 
-static M3Result  ValidateImports  (M3DylinkState * state)
+static M3Result  ValidateImportsFrom  (M3DylinkState * state,
+                                       u32 firstObject)
 {
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
         IM3Module module = state->objects [oi].module;
         for (u32 fi = 0; fi < module->numFuncImports; ++fi)
@@ -1072,9 +1285,9 @@ static M3Result  ValidateImports  (M3DylinkState * state)
 }
 
 
-static M3Result  ResolveGOT  (M3DylinkState * state)
+static M3Result  ResolveGOTFrom  (M3DylinkState * state, u32 firstObject)
 {
-    for (u32 oi = 0; oi < state->numObjects; ++oi)
+    for (u32 oi = firstObject; oi < state->numObjects; ++oi)
     {
         M3DylinkObject * object = & state->objects [oi];
         IM3Module module = object->module;
@@ -1162,14 +1375,15 @@ static M3Result  CallOptional  (IM3Module module, const char * name,
 
 
 static M3Result  RunInitializers  (M3DylinkState * state,
-                                   const u32 * order, u32 count)
+                                   const u32 * order, u32 count,
+                                   u32 dependencyProgramIndex)
 {
     for (u32 i = 0; i < count; ++i)
     {
         M3DylinkObject * object = & state->objects [order [i]];
         u32 programIndex = object->programIndex == UINT32_MAX
-                         ? 0 : object->programIndex;
-        M3Result result = ActivateContext (& state->contexts [programIndex]);
+                         ? dependencyProgramIndex : object->programIndex;
+        M3Result result = ActivateContext (state->contexts [programIndex]);
         if (result)
             return result;
         result = m3_RunStart (object->module);
@@ -1180,9 +1394,9 @@ static M3Result  RunInitializers  (M3DylinkState * state,
     {
         M3DylinkObject * object = & state->objects [order [i]];
         u32 programIndex = object->programIndex == UINT32_MAX
-                         ? 0 : object->programIndex;
+                         ? dependencyProgramIndex : object->programIndex;
         bool found;
-        M3Result result = ActivateContext (& state->contexts [programIndex]);
+        M3Result result = ActivateContext (state->contexts [programIndex]);
         if (result)
             return result;
         result = CallOptional (object->module,
@@ -1194,10 +1408,10 @@ static M3Result  RunInitializers  (M3DylinkState * state,
     {
         M3DylinkObject * object = & state->objects [order [i]];
         u32 programIndex = object->programIndex == UINT32_MAX
-                         ? 0 : object->programIndex;
+                         ? dependencyProgramIndex : object->programIndex;
         IM3Module module = object->module;
         bool found;
-        M3Result result = ActivateContext (& state->contexts [programIndex]);
+        M3Result result = ActivateContext (state->contexts [programIndex]);
         if (result)
             return result;
         result = CallOptional (module, "_initialize", & found);
@@ -1226,18 +1440,25 @@ static void  ReleaseUnloadedState  (M3DylinkState * state)
             m3_FreeModule (object->module);
         m3_Free (object->name);
     }
-    for (u32 i = 1; i < state->numContexts; ++i)
+    for (u32 i = 0; i < state->numContexts; ++i)
     {
+        IM3DylinkContext context = state->contexts [i];
+        if (context and not context->ownsStack
+            and context->continuationFrames ==
+                state->runtime->continuationFrames)
+        {
+            context->continuationFrames = NULL;
 #if d_m3RecordBacktraces
-        FreeContextBacktrace (& state->contexts [i]);
+            M3_INIT (context->backtrace);
 #endif
-        m3_Free (state->contexts [i].continuationFrames);
-        if (state->contexts [i].ownsStack)
-            m3_Free (state->contexts [i].stack);
+        }
+        FreeContextStorage (context);
     }
     m3_Free (state->contexts);
     m3_Free (state->objects);
     m3_Free (state->table);
+    FreeRangeList (state->freeMemoryRanges);
+    FreeRangeList (state->freeTableRanges);
     m3_Free (state);
 }
 
@@ -1246,20 +1467,25 @@ static M3Result  CreateContexts  (M3DylinkState * state,
                                   const M3DylinkProgram * programs,
                                   u32 numPrograms,
                                   const M3DylinkOptions * options,
-                                  u32 * memoryCursor)
+    u32 * memoryCursor)
 {
     IM3Runtime runtime = state->runtime;
-    state->contexts = m3_AllocArray (struct M3DylinkContext, numPrograms);
+    state->contexts = m3_AllocArray (IM3DylinkContext, numPrograms);
     if (not state->contexts)
         return m3Err_mallocFailed;
     state->numContexts = numPrograms;
+    state->contextCapacity = numPrograms;
 
     for (u32 i = 0; i < numPrograms; ++i)
     {
-        IM3DylinkContext context = & state->contexts [i];
+        IM3DylinkContext context = m3_AllocStruct (struct M3DylinkContext);
+        if (not context)
+            return m3Err_mallocFailed;
+        state->contexts [i] = context;
         context->state = state;
         context->module = programs [i].module;
         context->userdata = programs [i].userdata;
+        context->programIndex = i;
 
         u32 nativeStackSize = programs [i].nativeStackSize
                             ? programs [i].nativeStackSize
@@ -1309,19 +1535,252 @@ static M3Result  CreateContexts  (M3DylinkState * state,
                                     & context->linearStackHigh))
             return m3Err_dylinkUnsupported;
         context->linearStackPointer = context->linearStackHigh;
+
+        if (programs [i].linearHeapSize)
+        {
+            if (not AllocateAligned (memoryCursor, 4,
+                                     programs [i].linearHeapSize,
+                                     & context->linearHeapLow)
+                or not AllocateAligned (memoryCursor, 4, 0,
+                                        & context->linearHeapHigh))
+                return m3Err_dylinkUnsupported;
+            context->ownsLinearHeap = true;
+        }
     }
 
-    state->stackLow = state->contexts [0].linearStackLow;
-    state->stackHigh = state->contexts [0].linearStackHigh;
+    state->numActiveContexts = numPrograms;
+    state->stackLow = state->contexts [0]->linearStackLow;
+    state->stackHigh = state->contexts [0]->linearStackHigh;
     return m3Err_none;
 }
 
 
-M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
-                                const M3DylinkProgram * programs,
-                                uint32_t numPrograms,
-                                const M3DylinkOptions * options,
-                                IM3DylinkContext * outContexts)
+static M3Result  ReserveContextSlot  (M3DylinkState * state, u32 * o_slot)
+{
+    for (u32 i = 0; i < state->numContexts; ++i)
+    {
+        if (not state->contexts [i])
+        {
+            *o_slot = i;
+            return m3Err_none;
+        }
+    }
+    if (state->numContexts == state->contextCapacity)
+    {
+        u32 oldCapacity = state->contextCapacity;
+        u32 newCapacity = oldCapacity ? oldCapacity * 2u : 2u;
+        if (newCapacity < oldCapacity)
+            return m3Err_mallocFailed;
+        IM3DylinkContext * contexts =
+            m3_ReallocArray (IM3DylinkContext, state->contexts,
+                             newCapacity, oldCapacity);
+        if (not contexts)
+            return m3Err_mallocFailed;
+        state->contexts = contexts;
+        state->contextCapacity = newCapacity;
+    }
+    *o_slot = state->numContexts++;
+    return m3Err_none;
+}
+
+
+static bool  OriginStackInUse  (M3DylinkState * state)
+{
+    for (u32 i = 0; i < state->numContexts; ++i)
+        if (state->contexts [i]
+            and state->contexts [i]->stack == state->runtime->originStack)
+            return true;
+    return false;
+}
+
+
+static M3Result  CreateAddedContext  (M3DylinkState * state,
+                                      const M3DylinkProgram * program,
+                                      const M3DylinkOptions * options,
+                                      u32 slot,
+                                      IM3DylinkContext * o_context)
+{
+    IM3DylinkContext context = m3_AllocStruct (struct M3DylinkContext);
+    if (not context)
+        return m3Err_mallocFailed;
+    context->state = state;
+    context->module = program->module;
+    context->userdata = program->userdata;
+    context->programIndex = slot;
+
+    u32 nativeStackSize = program->nativeStackSize
+                        ? program->nativeStackSize : state->originStackSize;
+    if (nativeStackSize < sizeof (m3slot_t))
+    {
+        m3_Free (context);
+        return m3Err_dylinkUnsupported;
+    }
+    if (not OriginStackInUse (state)
+        and nativeStackSize == state->originStackSize)
+        context->stack = state->runtime->originStack;
+    else
+    {
+        context->stack = m3_Malloc ("Dylink context stack",
+                                    nativeStackSize
+                                    + 4 * sizeof (m3slot_t));
+        if (not context->stack)
+        {
+            m3_Free (context);
+            return m3Err_mallocFailed;
+        }
+        context->ownsStack = true;
+    }
+    context->stackSize = nativeStackSize;
+    context->numStackSlots = nativeStackSize / sizeof (m3slot_t);
+
+    u32 linearStackSize = program->linearStackSize
+                        ? program->linearStackSize
+                        : (options and options->linearStackSize
+                            ? options->linearStackSize
+                            : c_m3DylinkDefaultStackSize);
+    if (not AllocateRange (& state->freeMemoryRanges,
+                           & state->memoryCursor, 4, linearStackSize,
+                           & context->linearStackLow))
+    {
+        if (context->ownsStack)
+            m3_Free (context->stack);
+        m3_Free (context);
+        return m3Err_dylinkUnsupported;
+    }
+    context->linearStackHigh = context->linearStackLow + linearStackSize;
+    context->linearStackPointer = context->linearStackHigh;
+
+    u32 linearHeapSize = program->linearHeapSize;
+    if (not linearHeapSize)
+    {
+        M3DylinkMetadata * metadata =
+            (M3DylinkMetadata *) program->module->dylink;
+        u64 minimumBytes = (u64) program->module->memoryInfo.initPages
+                         * state->runtime->memory.pageSize;
+        u64 reservedBytes = (u64) metadata->memorySize + linearStackSize;
+        if (minimumBytes > reservedBytes)
+        {
+            u64 derived = minimumBytes - reservedBytes;
+            if (derived > UINT32_MAX)
+            {
+                FreeRange (& state->freeMemoryRanges,
+                           context->linearStackLow, linearStackSize);
+                if (context->ownsStack)
+                    m3_Free (context->stack);
+                m3_Free (context);
+                return m3Err_dylinkUnsupported;
+            }
+            linearHeapSize = (u32) derived;
+        }
+    }
+    if (linearHeapSize)
+    {
+        if (not AllocateRange (& state->freeMemoryRanges,
+                               & state->memoryCursor, 4,
+                               linearHeapSize,
+                               & context->linearHeapLow))
+        {
+            FreeRange (& state->freeMemoryRanges, context->linearStackLow,
+                       linearStackSize);
+            if (context->ownsStack)
+                m3_Free (context->stack);
+            m3_Free (context);
+            return m3Err_dylinkUnsupported;
+        }
+        context->linearHeapHigh = context->linearHeapLow
+                                + linearHeapSize;
+        context->ownsLinearHeap = true;
+    }
+    else
+        context->linearHeapLow = context->linearHeapHigh =
+            context->linearStackHigh;
+
+    state->contexts [slot] = context;
+    ++state->numActiveContexts;
+    *o_context = context;
+    return m3Err_none;
+}
+
+
+static void  ZeroLinearRange  (M3DylinkState * state, u32 base, u32 size)
+{
+    if (not state or not size or not state->runtime->memory.mallocated)
+        return;
+    u32 length = (u32) state->runtime->memory.mallocated->length;
+    if (base <= length and size <= length - base)
+        memset (m3MemData (state->runtime->memory.mallocated) + base, 0, size);
+}
+
+
+static void  ReleaseContextRanges  (M3DylinkState * state,
+                                    IM3DylinkContext context)
+{
+    if (not state or not context)
+        return;
+    u32 stackSize = context->linearStackHigh - context->linearStackLow;
+    ZeroLinearRange (state, context->linearStackLow, stackSize);
+    FreeRange (& state->freeMemoryRanges, context->linearStackLow, stackSize);
+    if (context->ownsLinearHeap)
+    {
+        u32 heapSize = context->linearHeapHigh - context->linearHeapLow;
+        ZeroLinearRange (state, context->linearHeapLow, heapSize);
+        FreeRange (& state->freeMemoryRanges, context->linearHeapLow,
+                   heapSize);
+    }
+}
+
+
+static void  UnlinkRuntimeModule  (IM3Runtime runtime, IM3Module module)
+{
+    if (not runtime or not module)
+        return;
+    IM3Module * link = & runtime->modules;
+    while (*link and *link != module)
+        link = & (*link)->next;
+    if (*link == module)
+        *link = module->next;
+    module->next = NULL;
+    module->runtime = NULL;
+}
+
+
+static void  ReleaseObjectRanges  (M3DylinkState * state,
+                                   M3DylinkObject * object)
+{
+    if (object->memorySize)
+    {
+        ZeroLinearRange (state, object->memoryBase, object->memorySize);
+        FreeRange (& state->freeMemoryRanges, object->memoryBase,
+                   object->memorySize);
+    }
+    if (object->tableSize)
+    {
+        if (object->tableBase <= state->tableSize
+            and object->tableSize <= state->tableSize - object->tableBase)
+            memset (state->table + object->tableBase, 0,
+                    object->tableSize * sizeof (IM3Function));
+        FreeRange (& state->freeTableRanges, object->tableBase,
+                   object->tableSize);
+    }
+    if (object->exportTableSize)
+    {
+        if (object->exportTableBase <= state->tableSize
+            and object->exportTableSize <=
+                state->tableSize - object->exportTableBase)
+            memset (state->table + object->exportTableBase, 0,
+                    object->exportTableSize * sizeof (IM3Function));
+        FreeRange (& state->freeTableRanges, object->exportTableBase,
+                   object->exportTableSize);
+    }
+}
+
+
+static M3Result  LoadGroup  (IM3Runtime runtime,
+                              const M3DylinkProgram * programs,
+                              uint32_t numPrograms,
+                              const M3DylinkOptions * options,
+                              IM3DylinkContext * outContexts,
+                              bool dynamicPrograms)
 {
     if (not runtime or not programs or not numPrograms)
         return m3Err_dylinkMissingSection;
@@ -1339,6 +1798,15 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
     if (not state)
         return m3Err_mallocFailed;
     state->runtime = runtime;
+    state->originStackSize = runtime->stackSize;
+    state->originNumStackSlots = runtime->numStackSlots;
+    state->originUserdata = dynamicPrograms ? NULL : runtime->userdata;
+    state->dynamicPrograms = dynamicPrograms;
+    state->stackPointerStorage.type = c_m3Type_i32;
+    state->stackPointerStorage.isMutable = true;
+    state->stackPointer = & state->stackPointerStorage;
+    state->stackLowGlobal = & state->stackLowStorage;
+    state->stackHighGlobal = & state->stackHighStorage;
 
     u32 * programObjectIndices = m3_AllocArray (u32, numPrograms);
     if (not programObjectIndices)
@@ -1400,6 +1868,8 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
             result = m3Err_dylinkUnsupported;
             goto _catch_order;
         }
+        object->memorySize = metadata->memorySize;
+        object->tableSize = metadata->tableSize;
 
         u32 modulePageSize = object->module->memoryInfo.pageSize
                            ? object->module->memoryInfo.pageSize
@@ -1425,6 +1895,9 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
                              & memoryCursor);
     if (result)
         goto _catch_order;
+    state->stackPointerStorage.i32Value = (i32) state->stackHigh;
+    state->stackLowStorage.i32Value = (i32) state->stackLow;
+    state->stackHighStorage.i32Value = (i32) state->stackHigh;
     state->heapBase = memoryCursor;
     if (not pageSize)
         pageSize = d_m3DefaultMemPageSize;
@@ -1447,8 +1920,18 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
         goto _catch_order;
     }
     state->heapEnd = (u32) allocatedBytes;
+    state->memoryCursor = state->heapEnd;
+    for (u32 i = 0; i < state->numContexts; ++i)
+    {
+        IM3DylinkContext context = state->contexts [i];
+        if (not context->linearHeapHigh)
+        {
+            context->linearHeapLow = state->heapBase;
+            context->linearHeapHigh = state->heapEnd;
+        }
+    }
 
-    u32 exportCount = CountFunctionExports (state);
+    u32 exportCount = CountFunctionExportsFrom (state, 0);
     if (exportCount > UINT32_MAX - tableCursor)
     {
         result = m3Err_dylinkUnsupported;
@@ -1457,6 +1940,8 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
     u32 firstExport = tableCursor;
     tableCursor += exportCount;
     state->tableSize = M3_MAX (tableCursor, minimumTable);
+    state->tableCursor = state->tableSize;
+    state->maximumTable = maximumTable;
     if (maximumTable and state->tableSize > maximumTable)
     {
         result = m3Err_dylinkUnsupported;
@@ -1481,13 +1966,13 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
         goto _catch_order;
     }
 
-    result = LinkFunctions (state);
+    result = LinkFunctionsFrom (state, 0);
     if (result)
         goto _catch_order;
-    result = LinkGlobalsAndBases (state);
+    result = LinkGlobalsAndBasesFrom (state, 0);
     if (result)
         goto _catch_order;
-    result = FillExportTable (state, firstExport);
+    result = FillExportTableFrom (state, 0, firstExport);
     if (result)
         goto _catch_order;
 
@@ -1505,7 +1990,7 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
                 goto _catch_order;
         }
     }
-    result = ValidateImports (state);
+    result = ValidateImportsFrom (state, 0);
     if (result)
         goto _catch_order;
 
@@ -1518,17 +2003,17 @@ M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
         if (result)
             goto _catch_loaded;
     }
-    result = ResolveGOT (state);
+    result = ResolveGOTFrom (state, 0);
     if (result)
         goto _catch_loaded;
-    result = ActivateContext (& state->contexts [0]);
+    result = ActivateContext (state->contexts [0]);
     if (result)
         goto _catch_loaded;
-    result = RunInitializers (state, order, orderCount);
+    result = RunInitializers (state, order, orderCount, 0);
 
     if (not result and outContexts)
         for (u32 i = 0; i < numPrograms; ++i)
-            outContexts [i] = & state->contexts [i];
+            outContexts [i] = state->contexts [i];
 
 _catch_loaded:
     m3_Free (order);
@@ -1544,6 +2029,385 @@ _catch:
 }
 
 
+M3Result  m3_DylinkLoadGroup  (IM3Runtime runtime,
+                                const M3DylinkProgram * programs,
+                                uint32_t numPrograms,
+                                const M3DylinkOptions * options,
+                                IM3DylinkContext * outContexts)
+{
+    return LoadGroup (runtime, programs, numPrograms, options, outContexts,
+                      true);
+}
+
+
+static void  TrimContextSlots  (M3DylinkState * state)
+{
+    while (state->numContexts and
+           not state->contexts [state->numContexts - 1])
+        --state->numContexts;
+}
+
+
+static i32  FindProgramObjectIndex  (M3DylinkState * state,
+                                     IM3Module module)
+{
+    for (u32 i = 0; i < state->numObjects; ++i)
+        if (state->objects [i].programIndex != UINT32_MAX
+            and state->objects [i].module == module)
+            return (i32) i;
+    return -1;
+}
+
+
+static bool  ProgramNameExists  (M3DylinkState * state, const char * name)
+{
+    for (u32 i = 0; i < state->numObjects; ++i)
+        if (state->objects [i].programIndex != UINT32_MAX
+            and NamesEqual (state->objects [i].name, name))
+            return true;
+    return false;
+}
+
+
+static void  RollBackAddedProgram  (M3DylinkState * state,
+                                    u32 firstObject,
+                                    IM3Module programModule,
+                                    IM3DylinkContext context,
+                                    IM3DylinkContext previousActive)
+{
+    if (context and state->activeContext == context)
+    {
+        if (previousActive and previousActive->state == state)
+            (void) ActivateContext (previousActive);
+        else
+            ParkRuntime (state);
+    }
+    if (context)
+    {
+        u32 slot = context->programIndex;
+        if (slot < state->numContexts and state->contexts [slot] == context)
+            state->contexts [slot] = NULL;
+        if (state->numActiveContexts)
+            --state->numActiveContexts;
+        ReleaseContextRanges (state, context);
+        FreeContextStorage (context);
+        TrimContextSlots (state);
+    }
+
+    for (u32 i = firstObject; i < state->numObjects; ++i)
+    {
+        M3DylinkObject * object = & state->objects [i];
+        ReleaseObjectRanges (state, object);
+        if (object->module and object->module->runtime == state->runtime)
+            UnlinkRuntimeModule (state->runtime, object->module);
+        if (object->module and object->module != programModule)
+            m3_FreeModule (object->module);
+        m3_Free (object->name);
+        M3_INIT (*object);
+    }
+    state->numObjects = firstObject;
+    TrimContextSlots (state);
+}
+
+
+M3Result  m3_DylinkAddProgram  (IM3Runtime runtime,
+                                 const M3DylinkProgram * program,
+                                 const M3DylinkOptions * options,
+                                 IM3DylinkContext * outContext)
+{
+    if (outContext)
+        *outContext = NULL;
+    if (not runtime or not program or not program->module or not outContext)
+        return m3Err_dylinkMissingSection;
+    if (not program->module->dylink)
+        return m3Err_dylinkMissingSection;
+    if (program->module->runtime)
+        return m3Err_moduleAlreadyLinked;
+
+    M3DylinkState * state = (M3DylinkState *) runtime->dylinkState;
+    if (not state or state->runtime != runtime or not state->dynamicPrograms)
+        return m3Err_dylinkUnsupported;
+    const char * name = program->name ? program->name : "main";
+    if (ProgramNameExists (state, name))
+        return m3Err_dylinkDuplicateSymbol;
+
+    u32 firstObject = state->numObjects;
+    u32 slot = 0;
+    u32 programObjectIndex = 0;
+    u32 * order = NULL;
+    u32 orderCount = 0;
+    u32 firstExport = 0;
+    u32 exportCount = 0;
+    bool exportRangeAllocated = false;
+    u32 minimumTable = state->tableSize;
+    u32 maximumTable = state->maximumTable;
+    u32 maximumPages = runtime->memory.maxPages;
+    IM3DylinkContext context = NULL;
+    IM3DylinkContext previousActive = state->activeContext;
+    M3Result result = ReserveContextSlot (state, & slot);
+    if (result)
+        return result;
+
+    result = AddObject (state, name, program->module, slot,
+                        & programObjectIndex);
+    if (result)
+        goto _catch;
+    result = CollectDependencies (state, programObjectIndex, options);
+    if (result)
+        goto _catch;
+
+    order = m3_AllocArray (u32, state->numObjects - firstObject);
+    if (state->numObjects != firstObject and not order)
+    {
+        result = m3Err_mallocFailed;
+        goto _catch;
+    }
+    for (u32 i = firstObject; i < state->numObjects; ++i)
+        state->objects [i].visit = 0;
+    TopologicalVisitNew (state, programObjectIndex, firstObject, order,
+                         & orderCount);
+
+    for (u32 i = 0; i < orderCount; ++i)
+    {
+        M3DylinkObject * object = & state->objects [order [i]];
+        M3DylinkMetadata * metadata =
+            (M3DylinkMetadata *) object->module->dylink;
+        result = ValidateObject (object,
+                                 object->programIndex != UINT32_MAX);
+        if (result)
+            goto _catch;
+        if (not AllocateRange (& state->freeMemoryRanges,
+                               & state->memoryCursor,
+                               metadata->memoryAlignment,
+                               metadata->memorySize,
+                               & object->memoryBase))
+        {
+            result = m3Err_dylinkUnsupported;
+            goto _catch;
+        }
+        object->memorySize = metadata->memorySize;
+        if (not AllocateRange (& state->freeTableRanges,
+                               & state->tableCursor,
+                               metadata->tableAlignment,
+                               metadata->tableSize,
+                               & object->tableBase))
+        {
+            result = m3Err_dylinkUnsupported;
+            goto _catch;
+        }
+        object->tableSize = metadata->tableSize;
+
+        u32 pageSize = object->module->memoryInfo.pageSize
+                     ? object->module->memoryInfo.pageSize
+                     : d_m3DefaultMemPageSize;
+        if (pageSize != runtime->memory.pageSize)
+        {
+            result = m3Err_dylinkUnsupported;
+            goto _catch;
+        }
+        u32 moduleMaxPages = object->module->memoryInfo.maxPages;
+        if (moduleMaxPages and moduleMaxPages < maximumPages)
+            maximumPages = moduleMaxPages;
+        minimumTable = M3_MAX (minimumTable,
+                               object->module->table0InitSize);
+        u32 moduleMaxTable = object->module->table0MaxSize;
+        if (moduleMaxTable
+            and (not maximumTable or moduleMaxTable < maximumTable))
+            maximumTable = moduleMaxTable;
+    }
+
+    result = CreateAddedContext (state, program, options, slot, & context);
+    if (result)
+        goto _catch;
+
+    exportCount = CountFunctionExportsFrom (state, firstObject);
+    if (not AllocateRange (& state->freeTableRanges, & state->tableCursor,
+                           0, exportCount, & firstExport))
+    {
+        result = m3Err_dylinkUnsupported;
+        goto _catch;
+    }
+    exportRangeAllocated = exportCount != 0;
+
+    u32 requiredTable = M3_MAX (state->tableCursor, minimumTable);
+    if (maximumTable and requiredTable > maximumTable)
+    {
+        result = m3Err_dylinkUnsupported;
+        goto _catch;
+    }
+    if (requiredTable > state->tableSize)
+    {
+        IM3Function * table = m3_ReallocArray (IM3Function, state->table,
+                                                requiredTable,
+                                                state->tableSize);
+        if (not table)
+        {
+            result = m3Err_mallocFailed;
+            goto _catch;
+        }
+        state->table = table;
+        state->tableSize = requiredTable;
+    }
+
+    u64 requiredBytes = state->memoryCursor;
+    u64 pages64 = (requiredBytes + runtime->memory.pageSize - 1u)
+                / runtime->memory.pageSize;
+    if (pages64 > UINT32_MAX or pages64 > maximumPages)
+    {
+        result = m3Err_wasmMemoryOverflow;
+        goto _catch;
+    }
+    if ((u32) pages64 > runtime->memory.numPages)
+    {
+        result = ResizeMemory (runtime, (u32) pages64);
+        if (result)
+            goto _catch;
+    }
+
+    result = LinkFunctionsFrom (state, firstObject);
+    if (result)
+        goto _catch;
+    result = LinkGlobalsAndBasesFrom (state, firstObject);
+    if (result)
+        goto _catch;
+    result = FillExportTableFrom (state, firstObject, firstExport);
+    if (result)
+        goto _catch;
+
+    if (options and options->linkHostImports)
+    {
+        for (u32 i = 0; i < orderCount; ++i)
+        {
+            IM3Module module = state->objects [order [i]].module;
+            module->runtime = runtime;
+            result = options->linkHostImports (options->context, module);
+            module->runtime = NULL;
+            if (result)
+                goto _catch;
+        }
+    }
+    result = ValidateImportsFrom (state, firstObject);
+    if (result)
+        goto _catch;
+
+    for (u32 i = firstObject; i < state->numObjects; ++i)
+        m3_SetModuleName (state->objects [i].module,
+                          state->objects [i].name);
+    for (u32 i = 0; i < orderCount; ++i)
+    {
+        result = m3_LoadModule (runtime, state->objects [order [i]].module);
+        if (result)
+            goto _catch;
+    }
+    result = ResolveGOTFrom (state, firstObject);
+    if (result)
+        goto _catch;
+    result = ActivateContext (context);
+    if (result)
+        goto _catch;
+    result = RunInitializers (state, order, orderCount, slot);
+    if (result)
+        goto _catch;
+
+    runtime->memory.maxPages = maximumPages;
+    state->maximumTable = maximumTable;
+
+    if (exportRangeAllocated)
+    {
+        u32 actualExports = 0;
+        for (u32 i = firstObject; i < state->numObjects; ++i)
+            actualExports += state->objects [i].exportTableSize;
+        if (actualExports < exportCount)
+            FreeRange (& state->freeTableRanges,
+                       firstExport + actualExports,
+                       exportCount - actualExports);
+    }
+    *outContext = context;
+    m3_Free (order);
+    return m3Err_none;
+
+_catch:
+    if (exportRangeAllocated)
+    {
+        u32 assignedExports = 0;
+        for (u32 i = firstObject; i < state->numObjects; ++i)
+            assignedExports += state->objects [i].exportTableSize;
+        if (assignedExports < exportCount)
+            FreeRange (& state->freeTableRanges,
+                       firstExport + assignedExports,
+                       exportCount - assignedExports);
+    }
+    RollBackAddedProgram (state, firstObject, program->module, context,
+                          previousActive);
+    m3_Free (order);
+    return result;
+}
+
+
+M3Result  m3_DylinkRemoveProgram  (IM3DylinkContext context)
+{
+    if (not context or not context->state)
+        return m3Err_dylinkUnsupported;
+    M3DylinkState * state = context->state;
+    if (not state->dynamicPrograms or not state->runtime
+        or state->runtime->dylinkState != state)
+        return m3Err_dylinkUnsupported;
+    u32 slot = context->programIndex;
+    if (slot >= state->numContexts or state->contexts [slot] != context)
+        return m3Err_dylinkUnsupported;
+    i32 objectIndex = FindProgramObjectIndex (state, context->module);
+    if (objectIndex < 0)
+        return m3Err_dylinkUnsupported;
+
+    if (state->activeContext == context)
+    {
+        IM3DylinkContext replacement = NULL;
+        for (u32 i = 0; i < state->numContexts; ++i)
+            if (state->contexts [i] and state->contexts [i] != context)
+            {
+                replacement = state->contexts [i];
+                break;
+            }
+        if (replacement)
+        {
+            M3Result result = ActivateContext (replacement);
+            if (result)
+                return result;
+        }
+        else
+            ParkRuntime (state);
+    }
+
+    state->contexts [slot] = NULL;
+    if (state->numActiveContexts)
+        --state->numActiveContexts;
+    ReleaseContextRanges (state, context);
+
+    M3DylinkObject object = state->objects [(u32) objectIndex];
+    ReleaseObjectRanges (state, & object);
+    UnlinkRuntimeModule (state->runtime, object.module);
+    m3_Free (object.name);
+    for (u32 i = (u32) objectIndex + 1; i < state->numObjects; ++i)
+        state->objects [i - 1] = state->objects [i];
+    --state->numObjects;
+    M3_INIT (state->objects [state->numObjects]);
+
+    context->state = NULL;
+    FreeContextStorage (context);
+    m3_FreeModule (object.module);
+    TrimContextSlots (state);
+    return m3Err_none;
+}
+
+
+uint32_t  m3_DylinkGetProgramCount  (IM3Runtime runtime)
+{
+    M3DylinkState * state = runtime
+        ? (M3DylinkState *) runtime->dylinkState : NULL;
+    return state ? state->numActiveContexts : 0;
+}
+
+
 M3Result  m3_DylinkLoad  (IM3Runtime runtime, IM3Module mainModule,
                            const char * mainName,
                            const M3DylinkOptions * options)
@@ -1554,7 +2418,7 @@ M3Result  m3_DylinkLoad  (IM3Runtime runtime, IM3Module mainModule,
     program.module = mainModule;
     program.nativeStackSize = runtime ? runtime->stackSize : 0;
     program.userdata = runtime ? runtime->userdata : NULL;
-    return m3_DylinkLoadGroup (runtime, & program, 1, options, NULL);
+    return LoadGroup (runtime, & program, 1, options, NULL, false);
 }
 
 #endif // d_m3HasDylink
