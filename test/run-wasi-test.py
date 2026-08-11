@@ -94,7 +94,7 @@ commands_full = [
   }, {
     "name":           "CoreMark",
     "wasm":           "./wasi/coremark/coremark.wasm",
-    "expect_pattern": "*Compiler version : Clang*Memory location  : STATIC*crcfinal      : 0x33ff*"
+    "expect_pattern": "*Compiler version : Clang*Memory location  : STATIC*Correct operation validated.*"
   }
 ]
 
