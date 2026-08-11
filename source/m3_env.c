@@ -1536,7 +1536,12 @@ static u32 SnapshotCountModules (IM3Runtime runtime)
 
 static IM3Module SnapshotGetModule (IM3Runtime runtime, u32 index)
 {
-    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, index--) if (index == 0) return m; return NULL;
+    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, index--)
+    {
+        if (index == 0)
+            return m;
+    }
+    return NULL;
 }
 
 static bool SnapshotFunctionIndex (IM3Function f, u32 * moduleIndex, u32 * functionIndex)
