@@ -1537,6 +1537,22 @@ d_m3Op  (SetGlobal_f64)
 #  define m3MemCheck(x) M3_LIKELY(x)
 #endif
 
+// WebAssembly memory32 addresses and memory instruction offsets are unsigned
+// 32-bit values. Native 64-bit targets can check their sum directly. On
+// narrower targets, EFFECTIVE >= OFFSET detects 32-bit addition wraparound;
+// subtracting the access size from the memory length is guarded separately.
+#if M3_SIZEOF_PTR >= 8
+    typedef u64 m3_mem_addr_t;
+#   define m3MemAccessInBounds(EFFECTIVE, OFFSET, ACCESS_SIZE, MEMORY_LENGTH) \
+        ((EFFECTIVE) + (ACCESS_SIZE) <= (MEMORY_LENGTH))
+#else
+    typedef u32 m3_mem_addr_t;
+#   define m3MemAccessInBounds(EFFECTIVE, OFFSET, ACCESS_SIZE, MEMORY_LENGTH) \
+        ((EFFECTIVE) >= (OFFSET)                                      \
+            && (ACCESS_SIZE) <= (MEMORY_LENGTH)                       \
+            && (EFFECTIVE) <= (MEMORY_LENGTH) - (ACCESS_SIZE))
+#endif
+
 // memcpy here is to support non-aligned access on some platforms.
 
 #define d_m3Load(REG,DEST_TYPE,SRC_TYPE)                \
@@ -1544,11 +1560,11 @@ d_m3Op(DEST_TYPE##_Load_##SRC_TYPE##_r)                 \
 {                                                       \
     d_m3TracePrepare                                    \
     u32 offset = immediate (u32);                       \
-    u64 operand = (u32) _r0;                            \
+    m3_mem_addr_t operand = (u32) _r0;                  \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (SRC_TYPE) <= _mem->length     \
+        m3MemAccessInBounds (operand, offset, sizeof (SRC_TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             u8* src8 = m3MemData(_mem) + operand;       \
@@ -1564,12 +1580,12 @@ d_m3Op(DEST_TYPE##_Load_##SRC_TYPE##_r)                 \
 d_m3Op(DEST_TYPE##_Load_##SRC_TYPE##_s)                 \
 {                                                       \
     d_m3TracePrepare                                    \
-    u64 operand = slot (u32);                           \
+    m3_mem_addr_t operand = slot (u32);                 \
     u32 offset = immediate (u32);                       \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (SRC_TYPE) <= _mem->length     \
+        m3MemAccessInBounds (operand, offset, sizeof (SRC_TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             u8* src8 = m3MemData(_mem) + operand;       \
@@ -1612,12 +1628,12 @@ d_m3Load_i (i64, i64);
 d_m3Op  (SRC_TYPE##_Store_##DEST_TYPE##_rs)             \
 {                                                       \
     d_m3TracePrepare                                    \
-    u64 operand = slot (u32);                           \
+    m3_mem_addr_t operand = slot (u32);                 \
     u32 offset = immediate (u32);                       \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (DEST_TYPE) <= _mem->length    \
+        m3MemAccessInBounds (operand, offset, sizeof (DEST_TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             d_m3TraceStore(SRC_TYPE, operand, REG);     \
@@ -1633,12 +1649,12 @@ d_m3Op  (SRC_TYPE##_Store_##DEST_TYPE##_sr)             \
 {                                                       \
     d_m3TracePrepare                                    \
     const SRC_TYPE value = slot (SRC_TYPE);             \
-    u64 operand = (u32) _r0;                            \
+    m3_mem_addr_t operand = (u32) _r0;                  \
     u32 offset = immediate (u32);                       \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (DEST_TYPE) <= _mem->length    \
+        m3MemAccessInBounds (operand, offset, sizeof (DEST_TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             d_m3TraceStore(SRC_TYPE, operand, value);   \
@@ -1654,12 +1670,12 @@ d_m3Op  (SRC_TYPE##_Store_##DEST_TYPE##_ss)             \
 {                                                       \
     d_m3TracePrepare                                    \
     const SRC_TYPE value = slot (SRC_TYPE);             \
-    u64 operand = slot (u32);                           \
+    m3_mem_addr_t operand = slot (u32);                 \
     u32 offset = immediate (u32);                       \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (DEST_TYPE) <= _mem->length    \
+        m3MemAccessInBounds (operand, offset, sizeof (DEST_TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             d_m3TraceStore(SRC_TYPE, operand, value);   \
@@ -1677,12 +1693,12 @@ d_m3Op  (SRC_TYPE##_Store_##DEST_TYPE##_ss)             \
 d_m3Op  (TYPE##_Store_##TYPE##_rr)                      \
 {                                                       \
     d_m3TracePrepare                                    \
-    u64 operand = (u32) _r0;                            \
+    m3_mem_addr_t operand = (u32) _r0;                  \
     u32 offset = immediate (u32);                       \
     operand += offset;                                  \
                                                         \
     if (m3MemCheck(                                     \
-        operand + sizeof (TYPE) <= _mem->length         \
+        m3MemAccessInBounds (operand, offset, sizeof (TYPE), _mem->length) \
     )) {                                                \
         {                                               \
             d_m3TraceStore(TYPE, operand, REG);         \
