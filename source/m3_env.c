@@ -892,8 +892,7 @@ M3Result  m3_FindFunctionInModule  (IM3Function * o_function,
     if (not i_module->runtime)
         return m3Err_moduleNotLinked;
 
-    function = (IM3Function) v_FindFunction (i_module,
-                                             (void *) i_functionName);
+    function = (IM3Function) v_FindFunction (i_module, i_functionName);
 #if d_m3HasDylink
     function = m3d_ResolveFunction (function);
 #endif
@@ -1022,6 +1021,8 @@ u8 *  GetStackPointerForArgs  (IM3Function i_function)
 
 
 
+#if d_m3HasFuel
+
 void  m3_SetFuel  (IM3Runtime runtime, uint64_t fuel)
 {
     if (runtime) { runtime->fuel = fuel; runtime->fuelEnabled = true; }
@@ -1104,6 +1105,51 @@ M3Result  m3_Resume  (IM3Runtime runtime)
     return m3Err_none;
 }
 
+#else
+
+void  m3_SetFuel  (IM3Runtime runtime, uint64_t fuel)
+{
+    (void) runtime;
+    (void) fuel;
+}
+
+void  m3_AddFuel  (IM3Runtime runtime, uint64_t fuel)
+{
+    (void) runtime;
+    (void) fuel;
+}
+
+void  m3_DisableFuel  (IM3Runtime runtime)
+{
+    (void) runtime;
+}
+
+uint64_t  m3_GetFuel  (IM3Runtime runtime)
+{
+    (void) runtime;
+    return 0;
+}
+
+uint32_t  m3_IsFuelEnabled  (IM3Runtime runtime)
+{
+    (void) runtime;
+    return 0;
+}
+
+uint32_t  m3_IsSuspended  (IM3Runtime runtime)
+{
+    (void) runtime;
+    return 0;
+}
+
+M3Result  m3_Resume  (IM3Runtime runtime)
+{
+    (void) runtime;
+    return m3Err_runtimeSuspended;
+}
+
+#endif // d_m3HasFuel
+
 M3Result  m3_CallV  (IM3Function i_function, ...)
 {
     va_list ap;
@@ -1131,7 +1177,9 @@ M3Result  m3_CallVL  (IM3Function i_function, va_list i_args)
     M3Result result = m3Err_none;
     u8* s = NULL;
 
+#if d_m3HasFuel
     if (runtime->suspended) return m3Err_runtimeSuspended;
+#endif
 
     if (!i_function->compiled) {
         return m3Err_missingCompiledCode;
@@ -1167,7 +1215,9 @@ _   (checkStartFunction(i_function->module))
 # endif
     ReportNativeStackUsage ();
 
+#if d_m3HasFuel
     if (result == m3Err_fuelExhausted) runtime->suspendedFunction = i_function;
+#endif
     runtime->lastCalled = result ? NULL : i_function;
 
     _catch: return result;
@@ -1180,7 +1230,9 @@ M3Result  m3_Call  (IM3Function i_function, uint32_t i_argc, const void * i_argp
     M3Result result = m3Err_none;
     u8* s = NULL;
 
+#if d_m3HasFuel
     if (runtime->suspended) return m3Err_runtimeSuspended;
+#endif
 
 
     if (i_argc != ftype->numArgs) {
@@ -1221,7 +1273,9 @@ _   (checkStartFunction(i_function->module))
 
     ReportNativeStackUsage ();
 
+#if d_m3HasFuel
     if (result == m3Err_fuelExhausted) runtime->suspendedFunction = i_function;
+#endif
     runtime->lastCalled = result ? NULL : i_function;
 
     _catch: return result;
@@ -1272,7 +1326,9 @@ _   (checkStartFunction(i_function->module))
     
     ReportNativeStackUsage ();
 
+#if d_m3HasFuel
     if (result == m3Err_fuelExhausted) runtime->suspendedFunction = i_function;
+#endif
     runtime->lastCalled = result ? NULL : i_function;
 
     _catch: return result;
@@ -1494,6 +1550,8 @@ M3BacktraceInfo *  m3_GetBacktrace  (IM3Runtime i_runtime)
 }
 
 
+#if d_m3HasSnapshot
+
 // Snapshot v1 is a process-local, same-binary/same-module continuation format.
 // It avoids serializing raw stack, memory, function, and code pointers: continuation PCs
 // are encoded as function identities plus offsets; SP is a stack-slot offset; memory
@@ -1536,7 +1594,12 @@ static u32 SnapshotCountModules (IM3Runtime runtime)
 
 static IM3Module SnapshotGetModule (IM3Runtime runtime, u32 index)
 {
-    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, index--) if (index == 0) return m; return NULL;
+    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, index--)
+    {
+        if (index == 0)
+            return m;
+    }
+    return NULL;
 }
 
 static bool SnapshotFunctionIndex (IM3Function f, u32 * moduleIndex, u32 * functionIndex)
@@ -1695,3 +1758,31 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
     runtime->numContinuationFrames = h.frameCount; runtime->suspendedFunction = &sm->functions[h.suspendedFunctionIndex]; runtime->lastCalled = NULL;
     return m3Err_none;
 }
+
+#else
+
+M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
+{
+    (void) runtime;
+    (void) out_size;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t buffer_size, uint32_t * out_size)
+{
+    (void) runtime;
+    (void) buffer;
+    (void) buffer_size;
+    (void) out_size;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uint32_t buffer_size)
+{
+    (void) runtime;
+    (void) buffer;
+    (void) buffer_size;
+    return m3Err_snapshotUnsupported;
+}
+
+#endif

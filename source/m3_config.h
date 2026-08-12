@@ -139,6 +139,27 @@
 #   define d_m3HasFloat                         1       // implement floating point ops
 # endif
 
+// Fuel/resume is enabled by default. The ATmega1284P example is already at
+// its flash limit, so it opts out unless the embedding project overrides it.
+# ifndef d_m3HasFuel
+#  if defined(__AVR_ATmega1284P__)
+#   define d_m3HasFuel                          0
+#  else
+#   define d_m3HasFuel                          1
+#  endif
+# endif
+
+// Runtime snapshots are enabled by default. AVR builds default to disabled
+// because the implementation does not fit on the supported flash-constrained
+// boards; either default can be overridden by defining d_m3HasSnapshot.
+# ifndef d_m3HasSnapshot
+#  if defined(__AVR__)
+#   define d_m3HasSnapshot                      0
+#  else
+#   define d_m3HasSnapshot                      1
+#  endif
+# endif
+
 // Optional persistent wasm3 metacode cache (.m3c). The implementation is
 // completely compiled out unless explicitly enabled by the embedding project.
 # ifndef d_m3HasM3C

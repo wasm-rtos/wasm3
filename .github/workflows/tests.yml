@@ -242,11 +242,11 @@ jobs:
     - name: Test WebAssembly spec (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-spec-test.py --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --repl"
+        python3 run-spec-test.py --exec "../build/wasm3 --stack-size 8388608 wasm3.wasm --repl"
     - name: Test WASI apps (in Wasm3, self-hosting)
       run: |
         cd test
-        python3 run-wasi-test.py --fast --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
+        python3 run-wasi-test.py --fast --exec "../build/wasm3 --stack-size 8388608 wasm3.wasm"
 
   ios:
     runs-on: macos-latest
@@ -496,20 +496,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: "github.event_name == 'push'"
+    env:
+      PARTICLE_TOKEN: ${{ secrets.PARTICLE_TOKEN }}
 
     steps:
     - uses: actions/checkout@v7
     - name: Set up Particle CLI
+      if: env.PARTICLE_TOKEN != ''
       run: sudo npm install -g particle-cli
     - name: Log in
-      env:
-        PARTICLE_TOKEN: ${{ secrets.PARTICLE_TOKEN }}
-      run: particle login --token $PARTICLE_TOKEN
+      if: env.PARTICLE_TOKEN != ''
+      run: particle login --token "$PARTICLE_TOKEN"
     - name: Build Photon
+      if: env.PARTICLE_TOKEN != ''
       run: |
         cd platforms/embedded/particle
         particle compile --followSymlinks photon
         particle compile --followSymlinks argon
+    - name: Skip Particle build without credentials
+      if: env.PARTICLE_TOKEN == ''
+      run: echo "PARTICLE_TOKEN is not configured; skipping Particle cloud builds"
 
   esp-idf:
     runs-on: ubuntu-latest

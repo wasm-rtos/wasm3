@@ -36,6 +36,8 @@
 
 d_m3BeginExternC
 
+#if d_m3HasFuel
+
 m3ret_t  FuelInsertFrameEx  (IM3Runtime runtime, u32 index, pc_t pc, m3stack_t sp, M3MemoryHeader * mem, m3reg_t r0, bool allowInternalControlFlow
 # if d_m3HasFloat
     , f64 fp0
@@ -106,6 +108,8 @@ m3ret_t  FuelPushFrame  (IM3Runtime runtime, pc_t pc, m3stack_t sp, M3MemoryHead
     );
 }
 
+#endif // d_m3HasFuel
+
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
 M3_NOINLINE
 m3ret_t vectorcall FuelDispatch (d_m3OpSig, cstr_t i_operationName)
@@ -116,6 +120,7 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 {
     // Keep fuel accounting in this shared dispatcher. Inlining it into every
     // metacode operation substantially increases the interpreter's flash size.
+#if d_m3HasFuel
     if (M3_UNLIKELY(_runtime and _runtime->fuelEnabled))
     {
         if (M3_UNLIKELY(_runtime->fuel == 0))
@@ -126,6 +131,7 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
             );
         _runtime->fuel--;
     }
+#endif
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
     M3_MUSTTAIL return ((IM3Operation)(*_pc))(_runtime, _pc + 1, d_m3OpArgs, i_operationName);
@@ -644,7 +650,9 @@ d_m3Op  (Call)
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
+#if d_m3HasFuel
     u32 frameDepth = _runtime->numContinuationFrames;
+#endif
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
     m3ret_t r = Call (_runtime, callPC, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
@@ -658,6 +666,7 @@ d_m3Op  (Call)
         nextOp ();
     else
     {
+#if d_m3HasFuel
         if (r == m3Err_fuelExhausted)
         {
             m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc, _sp, _mem, _r0
@@ -669,6 +678,7 @@ d_m3Op  (Call)
                 forwardTrap (parentResult);
         }
         else
+#endif
             pushBacktraceFrame ();
         forwardTrap (r);
     }
@@ -684,7 +694,9 @@ d_m3Op  (CallLinked)
 
     IM3Function function = m3d_ResolveFunction (importFunction);
     m3stack_t sp = _sp + stackOffset;
+#if d_m3HasFuel
     u32 frameDepth = _runtime->numContinuationFrames;
+#endif
     m3ret_t r = m3Err_none;
 
     if (M3_UNLIKELY(not function or not function->module))
@@ -710,6 +722,7 @@ d_m3Op  (CallLinked)
         nextOp ();
     else
     {
+#if d_m3HasFuel
         if (r == m3Err_fuelExhausted)
         {
             m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc,
@@ -722,6 +735,7 @@ d_m3Op  (CallLinked)
                 forwardTrap (parentResult);
         }
         else
+#endif
             pushBacktraceFrame ();
         forwardTrap (r);
     }
@@ -738,7 +752,9 @@ d_m3Op  (CallIndirect)
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
+#if d_m3HasFuel
     u32 frameDepth = _runtime->numContinuationFrames;
+#endif
 
     m3ret_t r = m3Err_none;
 
@@ -779,6 +795,7 @@ d_m3Op  (CallIndirect)
                         nextOpDirect ();
                     else
                     {
+#if d_m3HasFuel
                         if (r == m3Err_fuelExhausted)
                         {
                             m3ret_t parentResult = FuelInsertFrame (_runtime, frameDepth, _pc, _sp, _mem, _r0
@@ -790,6 +807,7 @@ d_m3Op  (CallIndirect)
                                 forwardTrap (parentResult);
                         }
                         else
+#endif
                             pushBacktraceFrame ();
                         forwardTrap (r);
                     }
@@ -1057,7 +1075,9 @@ d_m3Op  (Loop)
     d_m3ClearRegisters
 
     m3ret_t r;
+#if d_m3HasFuel
     u32 frameDepth = _runtime->numContinuationFrames;
+#endif
 
     IM3Memory memory = m3MemInfo (_mem);
 
@@ -1076,6 +1096,7 @@ d_m3Op  (Loop)
         // linear memory pointer needs refreshed here because the block it's looping over
         // can potentially invoke the grow operation.
         _mem = memory->mallocated;
+#if d_m3HasFuel
         if (r == m3Err_fuelExhausted)
         {
             m3ret_t loopResult = FuelInsertFrameEx (_runtime, frameDepth, _pc - 1, _sp, _mem, _r0, true
@@ -1087,6 +1108,7 @@ d_m3Op  (Loop)
                 forwardTrap (loopResult);
             forwardTrap (r);
         }
+#endif
     }
     while (r == _pc);
 

@@ -24,6 +24,10 @@ target_include_directories(m3 PUBLIC .)
 
 target_compile_features(m3 PRIVATE c_std_99)
 
+if(DEFINED BUILD_SNAPSHOT AND NOT BUILD_SNAPSHOT)
+    target_compile_definitions(m3 PUBLIC d_m3HasSnapshot=0)
+endif()
+
 if(BUILD_M3C)
     target_compile_definitions(m3 PUBLIC d_m3HasM3C=1)
 endif()
