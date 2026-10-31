@@ -1093,7 +1093,22 @@ M3Result  m3_Resume  (IM3Runtime runtime)
         }
         if (result)
         {
-            if (runtime->numContinuationFrames && runtime->continuationFrames [runtime->numContinuationFrames - 1].allowInternalControlFlow)
+            // A branch back to a loop header surfaces as that loop's id: the
+            // pc just after its op_Loop, while the loop frame keeps the op_Loop
+            // pc itself. Only the targeted loop continues; loops nested inside
+            // it are left, as op_Loop would leave them by forwarding the id.
+            bool continuesLoop = false;
+            while (runtime->numContinuationFrames &&
+                   runtime->continuationFrames [runtime->numContinuationFrames - 1].allowInternalControlFlow)
+            {
+                if ((pc_t) result == runtime->continuationFrames [runtime->numContinuationFrames - 1].pc + 1)
+                {
+                    continuesLoop = true;
+                    break;
+                }
+                runtime->numContinuationFrames--;
+            }
+            if (continuesLoop)
                 continue;
             ClearSuspendedRuntime (runtime);
             return result;
