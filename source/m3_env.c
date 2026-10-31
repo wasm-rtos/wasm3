@@ -1070,14 +1070,17 @@ M3Result  m3_Resume  (IM3Runtime runtime)
     while (runtime->numContinuationFrames)
     {
         M3ContinuationFrame frame = runtime->continuationFrames [--runtime->numContinuationFrames];
+        // Use the current linear memory, not the one recorded in the frame:
+        // an inner frame resumed earlier may have grown and moved it, just as
+        // op_Call reloads it after every call returns.
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, frame.mem, frame.r0
+        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, runtime->memory.mallocated, frame.r0
 #   if d_m3HasFloat
             , frame.fp0
 #   endif
             , d_m3BaseCstr);
 # else
-        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, frame.mem, frame.r0
+        M3Result result = (M3Result) RunCode (runtime, frame.pc, frame.sp, runtime->memory.mallocated, frame.r0
 #   if d_m3HasFloat
             , frame.fp0
 #   endif
