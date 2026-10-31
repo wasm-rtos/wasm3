@@ -1087,7 +1087,14 @@ d_m3Op  (Loop)
         d_m3TracePrint("iter {");
         trace_rt->callDepth++;
 #endif
-        r = nextOpImpl ();
+        // Enter every iteration through the fuel dispatcher. A body that only
+        // branches back (an empty `while (1) {}`) runs no other operation, so
+        // without this charge the loop would never run out of fuel.
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+        r = FuelDispatch (d_m3OpAllArgs, __FUNCTION__);
+# else
+        r = FuelDispatch (d_m3OpAllArgs);
+# endif
 
 #if d_m3EnableStrace >= 3
         trace_rt->callDepth--;
