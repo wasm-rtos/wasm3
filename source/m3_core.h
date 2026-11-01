@@ -133,7 +133,8 @@ typedef struct M3MemoryHeader
 {
     IM3Runtime      runtime;
     void *          maxStack;
-    size_t          length;
+    size_t          length;         // bytes the module may access
+    size_t          capacity;       // bytes allocated after the header (>= length)
 }
 M3MemoryHeader;
 

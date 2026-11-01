@@ -1166,7 +1166,7 @@ static M3Result  LoadProgram  (IM3Runtime runtime, IM3Module mainModule,
     }
 
     runtime->memory.pageSize = pageSize;
-    runtime->memory.maxPages = maximumPages ? maximumPages : 65536;
+    runtime->memory.maxPages = maximumPages ? maximumPages : M3_DefaultMaxPages (pageSize);
     result = ResizeMemory (runtime, pages);
     if (result)
         goto _catch_order;

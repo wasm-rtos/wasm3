@@ -359,8 +359,8 @@ M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
     {
         u32 maxPages = i_module->memoryInfo.maxPages;
         u32 pageSize = i_module->memoryInfo.pageSize;
-        io_runtime->memory.maxPages = maxPages ? maxPages : 65536;
         io_runtime->memory.pageSize = pageSize ? pageSize : d_m3DefaultMemPageSize;
+        io_runtime->memory.maxPages = maxPages ? maxPages : M3_DefaultMaxPages (io_runtime->memory.pageSize);
 
         result = ResizeMemory (io_runtime, i_module->memoryInfo.initPages);
     }
@@ -376,8 +376,8 @@ M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
     {
         u32 maxPages = i_module->memoryInfo.maxPages;
         u32 pageSize = i_module->memoryInfo.pageSize;
-        io_runtime->memory.maxPages = maxPages ? maxPages : 65536;
         io_runtime->memory.pageSize = pageSize ? pageSize : d_m3DefaultMemPageSize;
+        io_runtime->memory.maxPages = maxPages ? maxPages : M3_DefaultMaxPages (io_runtime->memory.pageSize);
 
         result = ResizeMemory (io_runtime, i_module->memoryInfo.initPages);
     }
@@ -385,6 +385,15 @@ M3Result  InitMemory  (IM3Runtime io_runtime, IM3Module i_module)
     return result;
 }
 #endif
+
+
+// Without a declared maximum a memory may span the whole 32-bit address
+// space: 2^32 bytes in pages of the module's size.
+u32  M3_DefaultMaxPages  (u32 i_pageSize)
+{
+    u64 pages = (1ull << 32) / (i_pageSize ? i_pageSize : d_m3DefaultMemPageSize);
+    return pages > UINT32_MAX ? UINT32_MAX : (u32) pages;
+}
 
 
 M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
@@ -407,10 +416,14 @@ M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
 
     if (numPagesToAlloc <= memory->maxPages)
     {
-        size_t numPageBytes = numPagesToAlloc * io_runtime->memory.pageSize;
+        u64 numPageBytes64 = (u64) numPagesToAlloc * io_runtime->memory.pageSize;
+        _throwif ("linear memory limitation exceeded", numPageBytes64 > SIZE_MAX - sizeof (M3MemoryHeader));
+        size_t numPageBytes = (size_t) numPageBytes64;
 
 #if d_m3MaxLinearMemoryPages > 0
-        _throwif("linear memory limitation exceeded", numPagesToAlloc > d_m3MaxLinearMemoryPages);
+        // The limit counts 64 KiB pages whatever page size the module uses.
+        _throwif("linear memory limitation exceeded",
+                 numPageBytes64 > (u64) d_m3MaxLinearMemoryPages * d_m3DefaultMemPageSize);
 #endif
 
         // Limit the amount of memory that gets actually allocated
@@ -418,16 +431,37 @@ M3Result  ResizeMemory  (IM3Runtime io_runtime, u32 i_numPages)
             numPageBytes = M3_MIN (numPageBytes, io_runtime->memoryLimit);
         }
 
-        size_t numBytes = numPageBytes + sizeof (M3MemoryHeader);
+        if (memory->mallocated and numPageBytes <= memory->mallocated->capacity)
+        {
+            // Spare room from an earlier grow: wasm memory starts out zeroed.
+            size_t oldLength = memory->mallocated->length;
+            if (numPageBytes > oldLength)
+                memset (m3MemData (memory->mallocated) + oldLength, 0, numPageBytes - oldLength);
+        }
+        else
+        {
+            size_t capacity = numPageBytes;
+            size_t previousCapacity = memory->mallocated ? memory->mallocated->capacity : 0;
+#if d_m3MemoryGrowthSlack > 0
+            if (memory->mallocated)
+            {
+                u64 maximum = M3_MIN ((u64) memory->maxPages * io_runtime->memory.pageSize,
+                                      (u64) (SIZE_MAX - sizeof (M3MemoryHeader)));
+                u64 grown = (u64) numPageBytes + numPageBytes / d_m3MemoryGrowthSlack;
+                if (io_runtime->memoryLimit)
+                    maximum = M3_MIN (maximum, (u64) io_runtime->memoryLimit);
+                capacity = (size_t) M3_MAX ((u64) numPageBytes, M3_MIN (grown, maximum));
+            }
+#endif
+            size_t numPreviousBytes = memory->mallocated ? previousCapacity + sizeof (M3MemoryHeader) : 0;
 
-        size_t numPreviousBytes = memory->numPages * io_runtime->memory.pageSize;
-        if (numPreviousBytes)
-            numPreviousBytes += sizeof (M3MemoryHeader);
+            void* newMem = m3_Realloc ("Wasm Linear Memory", memory->mallocated,
+                                       capacity + sizeof (M3MemoryHeader), numPreviousBytes);
+            _throwifnull(newMem);
 
-        void* newMem = m3_Realloc ("Wasm Linear Memory", memory->mallocated, numBytes, numPreviousBytes);
-        _throwifnull(newMem);
-
-        memory->mallocated = (M3MemoryHeader*)newMem;
+            memory->mallocated = (M3MemoryHeader*)newMem;
+            memory->mallocated->capacity = capacity;
+        }
 
 # if d_m3LogRuntime
         M3MemoryHeader * oldMallocated = memory->mallocated;

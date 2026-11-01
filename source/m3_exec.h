@@ -921,7 +921,8 @@ d_m3Op  (MemGrow)
         {
             u32 requiredPages = memory->numPages + numPagesToGrow;
 
-            M3Result r = ResizeMemory (runtime, requiredPages);
+            M3Result r = requiredPages < memory->numPages ? m3Err_wasmMemoryOverflow
+                                                          : ResizeMemory (runtime, requiredPages);
             if (r)
                 _r0 = -1;
 
