@@ -132,6 +132,15 @@
 #   define d_m3LogNativeStack                   0       // track the memory usage of the C-stack
 # endif
 
+// Native C stack budget for Wasm calls (m3_SetNativeStackBudget). Each
+// nested Wasm call takes about 100 bytes of C stack. When a call would go
+// past the budget, a runtime with fuel ends its slice (suspending unwinds
+// the native frames, and resuming starts over at the top) and a runtime
+// without fuel traps with a stack overflow. Compiled out with 0.
+# ifndef d_m3HasNativeStackBudget
+#   define d_m3HasNativeStackBudget             1
+# endif
+
 // Optional per-account heap accounting (m3_SetHeapAccount). Every block
 // then carries a small header with its size and account.
 # ifndef d_m3HasHeapAccounting

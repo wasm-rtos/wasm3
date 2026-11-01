@@ -270,6 +270,12 @@ static inline void * m3_Realloc (ccstr_t name, void * i_ptr, size_t i_newSize, s
 #define     m3_Free(P)                              do { m3_Free_Impl ((void*)(P)); (P) = NULL; } while(0)
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#   define M3_NATIVE_SP()   ((u8 *) __builtin_frame_address (0))
+#else
+#   define M3_NATIVE_SP()   ((u8 *) & (char) {0})
+#endif
+
 M3Result    NormalizeType           (u8 * o_type, i8 i_convolutedWasmType);
 
 bool        IsIntType               (u8 i_wasmType);

@@ -1059,6 +1059,48 @@ uint64_t  m3_GetFuel  (IM3Runtime runtime) { return runtime ? runtime->fuel : 0;
 uint32_t  m3_IsFuelEnabled  (IM3Runtime runtime) { return runtime ? runtime->fuelEnabled : 0; }
 uint32_t  m3_IsSuspended  (IM3Runtime runtime) { return runtime ? runtime->suspended : 0; }
 
+#if d_m3HasNativeStackBudget
+// The outermost entry sets the native stack limit; nested entries (a host
+// function calling back into Wasm) keep the one already set.
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig, cstr_t i_operationName)
+# else
+m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig)
+# endif
+{
+    if (not _runtime->nativeStackBudget or _runtime->nativeStackLimit)
+    {
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+        return FuelDispatch (d_m3OpAllArgs, i_operationName);
+# else
+        return FuelDispatch (d_m3OpAllArgs);
+# endif
+    }
+
+    _runtime->nativeStackLimit = M3_NATIVE_SP () - _runtime->nativeStackBudget;
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+    m3ret_t r = FuelDispatch (d_m3OpAllArgs, i_operationName);
+# else
+    m3ret_t r = FuelDispatch (d_m3OpAllArgs);
+# endif
+    _runtime->nativeStackLimit = NULL;
+    return r;
+}
+#endif
+
+
+void  m3_SetNativeStackBudget  (IM3Runtime runtime, uint32_t bytes)
+{
+#if d_m3HasNativeStackBudget
+    if (runtime)
+        runtime->nativeStackBudget = bytes;
+#else
+    (void) runtime;
+    (void) bytes;
+#endif
+}
+
+
 M3Result  m3_Resume  (IM3Runtime runtime)
 {
     if (not runtime or not runtime->suspended or runtime->numContinuationFrames == 0)

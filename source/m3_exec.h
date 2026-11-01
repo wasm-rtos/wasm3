@@ -1019,6 +1019,17 @@ d_m3Op  (Entry)
     if (M3_LIKELY ((void *) (_sp + function->maxStackSlots) < _mem->maxStack))
 #endif
     {
+#if d_m3HasNativeStackBudget
+        if (M3_UNLIKELY (_runtime and _runtime->nativeStackLimit and M3_NATIVE_SP () < (u8 *) _runtime->nativeStackLimit))
+        {
+# if d_m3HasFuel
+            if (_runtime->fuelEnabled)
+                _runtime->fuel = 0;     // end the slice here; suspending unwinds the native frames
+            else
+# endif
+                newTrap (m3Err_trapStackOverflow);
+        }
+#endif
 #if defined(DEBUG)
         function->hits++;
 #endif
