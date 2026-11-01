@@ -48,6 +48,10 @@ uint64_t m3_GetTimestamp()
 
 #endif
 
+#if d_m3FixedHeap && d_m3HasHeapAccounting
+#   error "d_m3HasHeapAccounting needs the system allocator, not d_m3FixedHeap"
+#endif
+
 #if d_m3FixedHeap
 
 static u8 fixedHeap[d_m3FixedHeap];
@@ -120,6 +124,133 @@ void *  m3_Realloc_Impl  (void * i_ptr, size_t i_newSize, size_t i_oldSize)
     }
 
     return newPtr;
+}
+
+#elif d_m3HasHeapAccounting
+
+struct M3HeapAccount
+{
+    size_t      bytes;
+    size_t      peakBytes;
+    size_t      numBlocks;
+    bool        released;
+};
+
+// Header in front of every block, padded to the strictest alignment.
+typedef union M3HeapBlock
+{
+    struct
+    {
+        size_t          size;
+        M3HeapAccount * account;
+    }
+    info;
+    max_align_t         align;
+}
+M3HeapBlock;
+
+static M3HeapAccount * s_heapAccount = NULL;
+
+M3HeapAccount *  m3_NewHeapAccount  (void)
+{
+    return (M3HeapAccount *) calloc (1, sizeof (M3HeapAccount));
+}
+
+void  m3_ReleaseHeapAccount  (M3HeapAccount * i_account)
+{
+    if (not i_account)
+        return;
+    if (s_heapAccount == i_account)
+        s_heapAccount = NULL;
+    if (i_account->numBlocks == 0)
+        free (i_account);
+    else
+        i_account->released = true;
+}
+
+M3HeapAccount *  m3_SetHeapAccount  (M3HeapAccount * i_account)
+{
+    M3HeapAccount * previous = s_heapAccount;
+    s_heapAccount = i_account;
+    return previous;
+}
+
+size_t  m3_GetHeapAccountBytes  (const M3HeapAccount * i_account)
+{
+    return i_account ? i_account->bytes : 0;
+}
+
+size_t  m3_GetHeapAccountPeakBytes  (const M3HeapAccount * i_account)
+{
+    return i_account ? i_account->peakBytes : 0;
+}
+
+static void  ChargeHeapAccount  (M3HeapAccount * io_account, size_t i_size)
+{
+    if (io_account)
+    {
+        io_account->bytes += i_size;
+        if (io_account->bytes > io_account->peakBytes)
+            io_account->peakBytes = io_account->bytes;
+    }
+}
+
+static void  CreditHeapAccount  (M3HeapAccount * io_account, size_t i_size)
+{
+    if (io_account)
+        io_account->bytes -= i_size;
+}
+
+void *  m3_Malloc_Impl  (size_t i_size)
+{
+    M3HeapBlock * block = (M3HeapBlock *) calloc (1, sizeof (M3HeapBlock) + i_size);
+    if (not block)
+        return NULL;
+
+    block->info.size = i_size;
+    block->info.account = s_heapAccount;
+    if (s_heapAccount)
+    {
+        ++s_heapAccount->numBlocks;
+        ChargeHeapAccount (s_heapAccount, i_size);
+    }
+    return block + 1;
+}
+
+void  m3_Free_Impl  (void * io_ptr)
+{
+    if (not io_ptr)
+        return;
+
+    M3HeapBlock * block = (M3HeapBlock *) io_ptr - 1;
+    M3HeapAccount * account = block->info.account;
+    if (account)
+    {
+        CreditHeapAccount (account, block->info.size);
+        if (--account->numBlocks == 0 and account->released)
+            free (account);
+    }
+    free (block);
+}
+
+void *  m3_Realloc_Impl  (void * i_ptr, size_t i_newSize, size_t i_oldSize)
+{
+    if (not i_ptr)
+        return m3_Malloc_Impl (i_newSize);
+    if (M3_UNLIKELY(i_newSize == i_oldSize)) return i_ptr;
+
+    M3HeapBlock * block = (M3HeapBlock *) i_ptr - 1;
+    size_t previousSize = block->info.size;
+    M3HeapBlock * newBlock = (M3HeapBlock *) realloc (block, sizeof (M3HeapBlock) + i_newSize);
+    if (M3_UNLIKELY(not newBlock))
+        return NULL;
+
+    if (i_newSize > previousSize)
+        memset ((u8 *) (newBlock + 1) + previousSize, 0x0, i_newSize - previousSize);
+    newBlock->info.size = i_newSize;
+    CreditHeapAccount (newBlock->info.account, previousSize);
+    ChargeHeapAccount (newBlock->info.account, i_newSize);
+    return newBlock + 1;
 }
 
 #else
