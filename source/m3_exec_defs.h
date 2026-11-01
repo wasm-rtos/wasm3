@@ -69,12 +69,30 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig);
 #   define jumpOpDirect(PC)          do { pc_t _jumpPC = (pc_t)(PC); M3_MUSTTAIL return FuelDispatch (_runtime, _jumpPC, d_m3OpArgs); } while (0)
 # endif
 
+#if d_m3HasNativeStackBudget
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig, cstr_t i_operationName);
+# else
+m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig);
+# endif
+#endif
+
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
 d_m3RetSig  RunCode  (d_m3OpSig, cstr_t i_operationName)
 # else
 d_m3RetSig  RunCode  (d_m3OpSig)
 # endif
 {
+#if d_m3HasNativeStackBudget
+    if (_runtime)
+    {
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+        return RunCodeWithNativeLimit (d_m3OpAllArgs, i_operationName);
+# else
+        return RunCodeWithNativeLimit (d_m3OpAllArgs);
+# endif
+    }
+#endif
     nextOpDirect();
 }
 

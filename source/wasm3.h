@@ -348,6 +348,10 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     size_t              m3_GetHeapAccountPeakBytes  (const M3HeapAccount * i_account);
 #endif
 
+    // Limit the native C stack nested Wasm calls may take, in bytes (0 =
+    // unlimited, the default). See d_m3HasNativeStackBudget.
+    void                m3_SetNativeStackBudget   (IM3Runtime runtime, uint32_t bytes);
+
     void                m3_SetFuel                (IM3Runtime runtime, uint64_t fuel);
     void                m3_AddFuel                (IM3Runtime runtime, uint64_t fuel);
     void                m3_DisableFuel            (IM3Runtime runtime);

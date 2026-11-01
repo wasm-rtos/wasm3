@@ -215,6 +215,11 @@ typedef struct M3Runtime
     u32                     numStackSlots;
     IM3Function             lastCalled;     // last function that successfully executed
 
+#if d_m3HasNativeStackBudget
+    u32                     nativeStackBudget;  // bytes, 0 = unlimited
+    void *                  nativeStackLimit;   // set by the outermost entry
+#endif
+
     u64                     fuel;
     bool                    fuelEnabled;
     bool                    suspended;
