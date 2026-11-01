@@ -1876,6 +1876,8 @@ static M3Result SnapshotRead (IM3Runtime runtime, M3SnapshotStream * s)
     IM3Module module = runtime ? runtime->modules : NULL;
     M3SnapshotFrame * frames = NULL;
     M3SafePointQuery * queries = NULL;
+    u32 numQueries = 0;
+    u8 * memory = NULL;
 
     if (not runtime or not module or module->next)
         return m3Err_snapshotUnsupported;
@@ -1901,7 +1903,6 @@ static M3Result SnapshotRead (IM3Runtime runtime, M3SnapshotStream * s)
     if (not frames or not queries)
         _throw (m3Err_mallocFailed);
 
-    u32 numQueries = 0;
     for (u32 i = 0; i < frameCount; ++i)
     {
         M3SnapshotFrame * f = & frames [i];
@@ -1954,7 +1955,7 @@ _       (ResizeMemory (runtime, memoryPages));
 
 _   (SnapshotGet (s, runtime->stack, stackSlots * (u32) sizeof (m3slot_t)));
 
-    u8 * memory = memoryBytes ? m3MemData (runtime->memory.mallocated) : NULL;
+    memory = memoryBytes ? m3MemData (runtime->memory.mallocated) : NULL;
     for (u32 at = 0; at < memoryBytes; )
     {
         u32 zeros = 0, data = 0;
