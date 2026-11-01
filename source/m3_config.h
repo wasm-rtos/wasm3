@@ -12,8 +12,15 @@
 
 // general --------------------------------------------------------------------
 
+// Compiled code is allocated in pages of at least this many bytes (a power
+// of two); a function continues on a new page through a bridge when one
+// fills up. 256 code lines per page measured best for memory with no speed
+// cost (CoreMark within noise down to 128 lines, ~6% slower at 64 and ~15%
+// at 32), and it gives 1 KiB pages on 32-bit targets, 2 KiB on 64-bit hosts
+// and 512 bytes on AVR. The former 32 KiB made every runtime hold at least
+// 32 KiB of code.
 # ifndef d_m3CodePageAlignSize
-#   define d_m3CodePageAlignSize                32*1024
+#   define d_m3CodePageAlignSize                (256 * sizeof (void *))
 # endif
 
 # ifndef d_m3MaxFunctionStackHeight
