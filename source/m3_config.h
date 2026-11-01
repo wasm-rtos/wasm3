@@ -125,6 +125,12 @@
 #   define d_m3LogNativeStack                   0       // track the memory usage of the C-stack
 # endif
 
+// Optional per-account heap accounting (m3_SetHeapAccount). Every block
+// then carries a small header with its size and account.
+# ifndef d_m3HasHeapAccounting
+#   define d_m3HasHeapAccounting                0
+# endif
+
 # ifndef d_m3LogHeapOps
 #   define d_m3LogHeapOps                       0       // track heap usage
 # endif

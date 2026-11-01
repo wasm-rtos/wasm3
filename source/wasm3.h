@@ -333,6 +333,21 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
     M3ValueType         m3_GetArgType               (IM3Function i_function, uint32_t i_index);
     M3ValueType         m3_GetRetType               (IM3Function i_function, uint32_t i_index);
 
+#if defined(d_m3HasHeapAccounting) && d_m3HasHeapAccounting
+    // Heap accounting: while an account is active, every interpreter
+    // allocation is charged to it, and a block is credited back to the
+    // account it was charged to when freed. An account released while blocks
+    // still owe it lives on until the last of them is freed.
+    typedef struct M3HeapAccount M3HeapAccount;
+
+    M3HeapAccount *     m3_NewHeapAccount           (void);
+    void                m3_ReleaseHeapAccount       (M3HeapAccount * i_account);
+    // Returns the previously active account (NULL charges nobody).
+    M3HeapAccount *     m3_SetHeapAccount           (M3HeapAccount * i_account);
+    size_t              m3_GetHeapAccountBytes      (const M3HeapAccount * i_account);
+    size_t              m3_GetHeapAccountPeakBytes  (const M3HeapAccount * i_account);
+#endif
+
     void                m3_SetFuel                (IM3Runtime runtime, uint64_t fuel);
     void                m3_AddFuel                (IM3Runtime runtime, uint64_t fuel);
     void                m3_DisableFuel            (IM3Runtime runtime);
