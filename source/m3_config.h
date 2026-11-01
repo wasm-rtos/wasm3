@@ -27,6 +27,13 @@
 #   define d_m3MaxFunctionStackHeight           2000    // max: 32768
 # endif
 
+// memory.grow keeps 1/N of the new size spare, so a module that grows in
+// small steps (custom page sizes) is not copied on every step. 0 grows to
+// the exact size. Initial memory is always exact.
+# ifndef d_m3MemoryGrowthSlack
+#   define d_m3MemoryGrowthSlack                8
+# endif
+
 # ifndef d_m3MaxLinearMemoryPages
 #   define d_m3MaxLinearMemoryPages             65536
 # endif

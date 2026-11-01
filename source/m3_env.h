@@ -253,6 +253,7 @@ M3Runtime;
 void                        InitRuntime                 (IM3Runtime io_runtime, u32 i_stackSizeInBytes);
 void                        Runtime_Release             (IM3Runtime io_runtime);
 
+u32                         M3_DefaultMaxPages          (u32 i_pageSize);
 M3Result                    ResizeMemory                (IM3Runtime io_runtime, u32 i_numPages);
 
 typedef void *              (* ModuleVisitor)           (IM3Module i_module, void * i_info);
