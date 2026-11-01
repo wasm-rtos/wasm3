@@ -189,6 +189,12 @@
 #  endif
 # endif
 
+// A snapshot is taken at a safe point, which only fuel makes a task stop at.
+# if d_m3HasSnapshot && !d_m3HasFuel
+#  undef d_m3HasSnapshot
+#  define d_m3HasSnapshot                       0
+# endif
+
 // Optional persistent wasm3 metacode cache (.m3c). The implementation is
 // completely compiled out unless explicitly enabled by the embedding project.
 # ifndef d_m3HasM3C

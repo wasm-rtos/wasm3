@@ -1,8 +1,8 @@
 # wasm3 runtime-control fork
 
-A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **process-local runtime snapshots**, an optional **persistent `.m3c` metacode cache**, and optional **`dylink.0` WebAssembly libraries**.
+A custom [`wasm3`](https://github.com/wasm3/wasm3) fork with **fuel control**, **runtime suspension**, **resume support**, **portable runtime snapshots**, an optional **persistent `.m3c` metacode cache**, and optional **`dylink.0` WebAssembly libraries**.
 
-This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, saving runtime snapshots to byte buffers, and restoring snapshots into fresh runtimes created from the same WASM module.
+This fork adds public APIs for controlling WebAssembly execution with per-runtime fuel, suspending execution when fuel is exhausted, resuming suspended runtimes, and saving a suspended runtime as a snapshot that a fresh runtime of the same module continues, on this machine or another.
 
 The original wasm3 project is a high-performance WebAssembly interpreter written in C. This fork keeps wasm3 as an interpreter, but extends it with runtime-control features needed for task scheduling, runtime swapping, and memory-pressure handling in higher-level systems.
 
@@ -15,12 +15,13 @@ This fork adds runtime-level control features that are not part of upstream wasm
 * Per-runtime fuel control.
 * Runtime suspension when fuel is exhausted.
 * Resume support for suspended runtimes.
-* Process-local runtime snapshot save/load/restore support.
-* Snapshot support for stack, globals, linear memory, fuel state, and continuation frames.
+* Suspension only at safe points: a function entry, the start of a loop
+  iteration, or the return from a call.
+* Runtime snapshots of stack, globals, linear memory and continuation frames,
+  free of host addresses: they load on other machines and pointer sizes.
 * Snapshot/resume support around host imports when the same imports are linked again before restoring.
 * Optional, storage-agnostic `.m3c` images with relocatable wasm3 metacode.
-* Optional `dylink.0` link groups with resident libraries, shared linear memory,
-  and per-program execution contexts.
+* Optional `dylink.0` libraries, loaded privately into each program's runtime.
 
 This fork does not add JIT or AOT compilation. It remains interpreter-only.
 
@@ -42,6 +43,12 @@ uint32_t m3_IsFuelEnabled(IM3Runtime runtime);
 
 uint32_t m3_IsSuspended(IM3Runtime runtime);
 M3Result m3_Resume(IM3Runtime runtime);
+
+typedef M3Result (*M3SnapshotWrite)(void* context, const void* data, uint32_t size);
+typedef M3Result (*M3SnapshotRead)(void* context, void* data, uint32_t size);
+
+M3Result m3_WriteRuntimeSnapshot(IM3Runtime runtime, M3SnapshotWrite write, void* context);
+M3Result m3_ReadRuntimeSnapshot(IM3Runtime runtime, M3SnapshotRead read, void* context);
 
 M3Result m3_GetRuntimeSnapshotSize(
     IM3Runtime runtime,
@@ -133,11 +140,13 @@ This first linker stage supports LLVM-style PIE mains and side modules. Non-PIE 
 
 Fuel is runtime-local.
 
-When fuel is enabled, wasm3 decreases the runtime fuel while executing WebAssembly code. When fuel reaches zero, execution stops and returns `m3Err_fuelExhausted`.
+When fuel is enabled, wasm3 decreases the runtime fuel while executing WebAssembly code. When fuel reaches zero, execution continues to the next safe point, then stops and returns `m3Err_fuelExhausted`. Safe points are a function's entry, the start of every loop iteration, and the return from every call, including calls to host functions; straight-line code between them is short, so the task stops soon after its fuel runs out. A host function that sets the fuel to zero makes the task stop as soon as it returns.
+
+Resuming always gets past the safe point it stopped at: the first operation of a resume or call costs no fuel.
 
 Fuel accounting runs in one shared metacode dispatcher instead of being
 inlined into every operation handler. This keeps the compiled interpreter
-smaller without changing fuel, suspension, or resume semantics.
+smaller.
 
 Fuel/resume support is compiled in by default. Flash-constrained ATmega1284P
 builds default to `d_m3HasFuel=0`; define it explicitly to override that
@@ -170,52 +179,51 @@ Calling `m3_Call()` on a suspended runtime returns `m3Err_runtimeSuspended`.
 Snapshot support is enabled by default, except on flash-constrained AVR targets.
 Define `d_m3HasSnapshot` explicitly to override the platform default. CMake
 builds can use `BUILD_SNAPSHOT=OFF` to compile the implementation out. The
-public snapshot functions then return `m3Err_snapshotUnsupported`.
+public snapshot functions then return `m3Err_snapshotUnsupported`. Snapshots
+need fuel; without `d_m3HasFuel` they are compiled out too.
 
-Snapshots can only be saved from suspended runtimes.
+Snapshots can only be saved from suspended runtimes, and load into a fresh
+runtime of the same module.
 
-A snapshot stores enough runtime state to recreate the runtime later and continue execution from the same suspended point.
+### What a snapshot holds
 
-Snapshot v1 stores:
-
-* Fuel state.
-* Suspended function identity.
-* Continuation frames.
-* Program-counter offsets.
-* Stack contents.
-* Linear memory.
+* Continuation frames, each named by its safe point: the function, the wasm
+  byte offset of the call or loop instruction (calls and loops carry it as an
+  immediate), the interpreter stack slot and the two registers.
+* The used part of the interpreter stack.
+* Linear memory, as runs of zero bytes and data, so mostly empty memory costs
+  little.
 * Globals.
-* Register state used by continuation frames.
-* Floating-point continuation state when floating point support is enabled.
+* A hash of the module's bytes, so a snapshot only loads into its own program.
 
-Use `m3_GetRuntimeSnapshotSize()` to query the required snapshot buffer size.
+Everything is little-endian and none of it is a host address. Loading compiles
+the functions the frames are in and asks the compiler where each safe point
+lands in its own code, so code page size, compile order and pointer size do
+not matter. A snapshot saved on a 64-bit machine continues on a 32-bit one and
+the other way round.
 
-Use `m3_SaveRuntimeSnapshot()` to save a suspended runtime into a caller-provided byte buffer.
+What has to match is the layout of the interpreter stack: the snapshot
+compiler version, the slot width (`d_m3Use32BitSlots`) and floating-point
+support. They are checked when loading. Builds that share them, such as the
+same wasm-rtos version on a microcontroller and in a browser, exchange
+snapshots.
 
-Use `m3_LoadRuntimeSnapshot()` to restore a snapshot into a fresh runtime created from the same WASM module.
+### Streams
 
-## Snapshot v1 scope
+`m3_WriteRuntimeSnapshot()` and `m3_ReadRuntimeSnapshot()` pass the snapshot
+through a callback in pieces, so it can go straight to a file, flash or a
+network without a buffer of its size. An error from the callback stops the
+call and is returned.
 
-Snapshot v1 is intentionally limited.
+`m3_GetRuntimeSnapshotSize()`, `m3_SaveRuntimeSnapshot()` and
+`m3_LoadRuntimeSnapshot()` do the same with a caller-provided buffer.
 
-Snapshot v1 is:
+### Limits
 
-* Process-local.
-* Same-binary.
-* Same-module.
-* Same wasm3 build.
-* Intended for runtime swapping inside one running process.
-* Intended for task scheduling and RAM pressure handling in a higher-level runtime.
-
-Snapshot v1 is not:
-
-* A reboot-safe persistent format.
-* A cross-version serialization format.
-* A portable checkpoint format.
-* A save file format.
-* Guaranteed to work across different wasm3 builds, compiler settings, module layouts, platforms, or machines.
-
-The snapshot format is designed for controlled runtime swapping, not long-term persistence.
+* One module per runtime: `dylink.0` runtimes are not supported.
+* Loading compiles functions again, so it needs their wasm source; `.m3c`
+  modules that released it can save snapshots but not load them.
+* Tables changed at run time and dropped data segments are not recorded.
 
 ## Expected snapshot flow
 
@@ -282,7 +290,7 @@ Host-side counters, file handles, device state, OS state, graphics state, audio 
 
 `m3Err_snapshotBufferTooSmall` is returned when the provided output buffer is smaller than the required snapshot size.
 
-## Intended use in microwasm-os
+## Intended use in wasm-rtos
 
 This fork is intended to support task-like execution of WebAssembly programs.
 
@@ -298,7 +306,7 @@ A higher-level OS/runtime can:
 * Load the snapshot.
 * Continue execution from the same suspended point.
 
-This allows `microwasm-os` to implement scheduling, sleeping, and runtime swapping above wasm3 without modifying WASM programs.
+This allows `wasm-rtos` to implement scheduling, sleeping, and runtime swapping above wasm3 without modifying WASM programs.
 
 ## Repository notes
 
