@@ -120,17 +120,11 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 {
     // Keep fuel accounting in this shared dispatcher. Inlining it into every
     // metacode operation substantially increases the interpreter's flash size.
+    // Running out only marks the slice as over; the task stops at its next
+    // safe point (fuelDue), where its state can be named in any build.
 #if d_m3HasFuel
-    if (M3_UNLIKELY(_runtime and _runtime->fuelEnabled))
-    {
-        if (M3_UNLIKELY(_runtime->fuel == 0))
-            return FuelPushFrame (_runtime, _pc, _sp, _mem, _r0
-# if d_m3HasFloat
-                , _fp0
-# endif
-            );
+    if (M3_UNLIKELY(_runtime and _runtime->fuelEnabled) and _runtime->fuel)
         _runtime->fuel--;
-    }
 #endif
 
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
@@ -141,6 +135,25 @@ m3ret_t vectorcall FuelDispatch (d_m3OpSig)
 }
 
 # define rewrite_op(OP)             * ((void **) (_pc-1)) = (void*)(OP)
+
+#if d_m3HasFuel
+    // The slice is over: the next safe point stops the task.
+#   define fuelDue()                (_runtime and _runtime->fuelEnabled and _runtime->fuel == 0)
+#   if d_m3HasFloat
+#       define suspendAt(PC)        return FuelPushFrame (_runtime, (PC), _sp, _mem, _r0, _fp0)
+#   else
+#       define suspendAt(PC)        return FuelPushFrame (_runtime, (PC), _sp, _mem, _r0)
+#   endif
+#else
+#   define fuelDue()                false
+#   define suspendAt(PC)            do {} while (0)
+#endif
+
+#if d_m3HasSnapshot
+#   define skip_safe_point()        skip_immediate (u32)
+#else
+#   define skip_safe_point()        do {} while (0)
+#endif
 
 # define immediate(TYPE)            * ((TYPE *) _pc++)
 # define skip_immediate(TYPE)       (_pc++)
@@ -647,6 +660,7 @@ d_m3Op  (Call)
 {
     pc_t callPC                 = immediate (pc_t);
     i32 stackOffset             = immediate (i32);
+    skip_safe_point ();
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
@@ -663,7 +677,11 @@ d_m3Op  (Call)
     _mem = memory->mallocated;
 
     if (M3_LIKELY(not r))
+    {
+        if (M3_UNLIKELY(fuelDue ()))
+            suspendAt (_pc);
         nextOp ();
+    }
     else
     {
 #if d_m3HasFuel
@@ -690,6 +708,7 @@ d_m3Op  (CallLinked)
 {
     IM3Function importFunction  = immediate (IM3Function);
     i32 stackOffset             = immediate (i32);
+    skip_safe_point ();
     IM3Memory memory            = m3MemInfo (_mem);
 
     IM3Function function = m3d_ResolveFunction (importFunction);
@@ -719,7 +738,11 @@ d_m3Op  (CallLinked)
 
     _mem = memory->mallocated;
     if (M3_LIKELY(not r))
+    {
+        if (M3_UNLIKELY(fuelDue ()))
+            suspendAt (_pc);
         nextOp ();
+    }
     else
     {
 #if d_m3HasFuel
@@ -749,6 +772,7 @@ d_m3Op  (CallIndirect)
     IM3Module module            = immediate (IM3Module);
     IM3FuncType type            = immediate (IM3FuncType);
     i32 stackOffset             = immediate (i32);
+    skip_safe_point ();
     IM3Memory memory            = m3MemInfo (_mem);
 
     m3stack_t sp = _sp + stackOffset;
@@ -792,7 +816,11 @@ d_m3Op  (CallIndirect)
                     _mem = memory->mallocated;
 
                     if (M3_LIKELY(not r))
+                    {
+                        if (M3_UNLIKELY(fuelDue ()))
+                            suspendAt (_pc);
                         nextOpDirect ();
+                    }
                     else
                     {
 #if d_m3HasFuel
@@ -1031,6 +1059,8 @@ d_m3Op  (Entry)
                 newTrap (m3Err_trapStackOverflow);
         }
 #endif
+        if (M3_UNLIKELY(fuelDue ()))
+            suspendAt (_pc - 2);
 #if defined(DEBUG)
         function->hits++;
 #endif
@@ -1086,6 +1116,9 @@ d_m3Op  (Loop)
     // this reduces code size & stack usage
     d_m3ClearRegisters
 
+    pc_t loopOp = _pc - 1;
+    skip_safe_point ();
+
     m3ret_t r;
 #if d_m3HasFuel
     u32 frameDepth = _runtime->numContinuationFrames;
@@ -1099,13 +1132,17 @@ d_m3Op  (Loop)
         d_m3TracePrint("iter {");
         trace_rt->callDepth++;
 #endif
-        // Enter every iteration through the fuel dispatcher. A body that only
-        // branches back (an empty `while (1) {}`) runs no other operation, so
-        // without this charge the loop would never run out of fuel.
+        // Every iteration starts at a safe point, and enters through the fuel
+        // dispatcher: a body that only branches back (an empty `while (1) {}`)
+        // runs no other operation, so without this charge the loop would never
+        // run out of fuel.
+        if (M3_UNLIKELY(fuelDue ()))
+            r = m3Err_fuelExhausted;
+        else
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-        r = FuelDispatch (d_m3OpAllArgs, __FUNCTION__);
+            r = FuelDispatch (d_m3OpAllArgs, __FUNCTION__);
 # else
-        r = FuelDispatch (d_m3OpAllArgs);
+            r = FuelDispatch (d_m3OpAllArgs);
 # endif
 
 #if d_m3EnableStrace >= 3
@@ -1118,7 +1155,7 @@ d_m3Op  (Loop)
 #if d_m3HasFuel
         if (r == m3Err_fuelExhausted)
         {
-            m3ret_t loopResult = FuelInsertFrameEx (_runtime, frameDepth, _pc - 1, _sp, _mem, _r0, true
+            m3ret_t loopResult = FuelInsertFrameEx (_runtime, frameDepth, loopOp, _sp, _mem, _r0, true
 # if d_m3HasFloat
                 , _fp0
 # endif

@@ -46,6 +46,10 @@ typedef struct M3Function
 
     bytes_t                 wasm;
     bytes_t                 wasmEnd;
+# if d_m3HasSnapshot
+    u32                     wasmOffset;     // the body within the module, kept when the bytes are released
+    u32                     wasmEndOffset;
+# endif
 
     cstr_t                  names[d_m3MaxDuplicateFunctionImpl];
     cstr_t                  export_name;                            // should be a part of "names"

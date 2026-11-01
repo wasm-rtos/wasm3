@@ -89,6 +89,9 @@ typedef struct M3Module
 
     bytes_t                 wasmStart;
     bytes_t                 wasmEnd;
+# if d_m3HasSnapshot
+    u32                     wasmHash;
+# endif
 
     cstr_t                  name;
 
@@ -174,6 +177,27 @@ void                        Environment_AddFuncType     (IM3Environment i_enviro
 //---------------------------------------------------------------------------------------------------------------------------------
 
 
+// Kinds of safe point a suspended task can be at.
+enum
+{
+    c_m3SafePointReturn = 1,    // just after a call returned
+    c_m3SafePointLoop   = 2,    // at the start of a loop iteration
+    c_m3SafePointEntry  = 3     // at a function's entry
+};
+
+// op_Loop and, with snapshots, the wasm offset of its instruction.
+#define d_m3LoopOpLines         (1 + d_m3HasSnapshot)
+
+// Asks the compiler where a safe point lands in the code it emits.
+typedef struct M3SafePointQuery
+{
+    IM3Function             function;
+    u32                     wasmOffset;
+    u8                      kind;
+    pc_t                    pc;
+}
+M3SafePointQuery;
+
 typedef struct M3ContinuationFrame
 {
     pc_t                    pc;
@@ -227,6 +251,10 @@ typedef struct M3Runtime
     M3ContinuationFrame *   continuationFrames; // ordered outer-to-inner; resume executes from the end
     u32                     numContinuationFrames;
     u32                     maxContinuationFrames;
+# if d_m3HasSnapshot
+    M3SafePointQuery *      safePointQueries;   // filled in while compiling, during a snapshot load
+    u32                     numSafePointQueries;
+# endif
 
     void *                  userdata;
 

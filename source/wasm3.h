@@ -239,6 +239,20 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
 
     void *              m3_GetUserData              (IM3Runtime             i_runtime);
 
+    // Snapshots of a runtime suspended by fuel, written or read in pieces.
+    // A snapshot loads into a runtime of the same module, in any build with
+    // the same snapshot compiler version and slot width.
+    typedef M3Result (* M3SnapshotWrite) (void * context, const void * data, uint32_t size);
+    typedef M3Result (* M3SnapshotRead)  (void * context, void * data, uint32_t size);
+
+    M3Result            m3_WriteRuntimeSnapshot   (IM3Runtime             runtime,
+                                                     M3SnapshotWrite       write,
+                                                     void *                context);
+
+    M3Result            m3_ReadRuntimeSnapshot    (IM3Runtime             runtime,
+                                                     M3SnapshotRead        read,
+                                                     void *                context);
+
     M3Result            m3_GetRuntimeSnapshotSize (IM3Runtime             runtime,
                                                      uint32_t *            out_size);
 

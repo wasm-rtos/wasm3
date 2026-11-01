@@ -252,6 +252,8 @@ static u32  ConfigFlags  (void)
     flags |= d_m3NoFloatDynamic ? (1u << 13) : 0;
 #endif
     flags |= d_m3HasDylink           ? (1u << 14) : 0;
+    // Calls and loops carry a safe point offset when snapshots are on.
+    flags |= d_m3HasSnapshot         ? (1u << 15) : 0;
     return flags;
 }
 

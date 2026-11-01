@@ -93,7 +93,9 @@ d_m3RetSig  RunCode  (d_m3OpSig)
 # endif
     }
 #endif
-    nextOpDirect();
+    // The first operation is free: a task resumed at a safe point always gets
+    // past it, however little fuel the slice has.
+    return jumpOpImpl (_pc);
 }
 
 d_m3EndExternC

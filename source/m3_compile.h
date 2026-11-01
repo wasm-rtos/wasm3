@@ -198,6 +198,10 @@ M3Result    CompileBlock                (IM3Compilation io, IM3FuncType i_blockT
 
 M3Result    CompileBlockStatements      (IM3Compilation io);
 M3Result    CompileFunction             (IM3Function io_function);
+#if d_m3HasSnapshot
+// Whether the code at i_pc is a function entry.
+bool        IsEntryOperation            (pc_t i_pc);
+#endif
 
 M3Result    CompileRawFunction          (IM3Module io_module, IM3Function io_function, const void * i_function, const void * i_userdata);
 

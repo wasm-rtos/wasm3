@@ -1102,21 +1102,15 @@ m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig, cstr_t i_operationName)
 m3ret_t vectorcall RunCodeWithNativeLimit (d_m3OpSig)
 # endif
 {
-    if (not _runtime->nativeStackBudget or _runtime->nativeStackLimit)
-    {
 # if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-        return FuelDispatch (d_m3OpAllArgs, i_operationName);
-# else
-        return FuelDispatch (d_m3OpAllArgs);
+    (void) i_operationName;
 # endif
-    }
+    // The first operation is free, as in RunCode.
+    if (not _runtime->nativeStackBudget or _runtime->nativeStackLimit)
+        return jumpOpImpl (_pc);
 
     _runtime->nativeStackLimit = M3_NATIVE_SP () - _runtime->nativeStackBudget;
-# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
-    m3ret_t r = FuelDispatch (d_m3OpAllArgs, i_operationName);
-# else
-    m3ret_t r = FuelDispatch (d_m3OpAllArgs);
-# endif
+    m3ret_t r = jumpOpImpl (_pc);
     _runtime->nativeStackLimit = NULL;
     return r;
 }
@@ -1173,14 +1167,14 @@ M3Result  m3_Resume  (IM3Runtime runtime)
         if (result)
         {
             // A branch back to a loop header surfaces as that loop's id: the
-            // pc just after its op_Loop, while the loop frame keeps the op_Loop
-            // pc itself. Only the targeted loop continues; loops nested inside
+            // pc just after its op_Loop and safe point, while the loop frame
+            // keeps the op_Loop pc itself. Only the targeted loop continues; loops nested inside
             // it are left, as op_Loop would leave them by forwarding the id.
             bool continuesLoop = false;
             while (runtime->numContinuationFrames &&
                    runtime->continuationFrames [runtime->numContinuationFrames - 1].allowInternalControlFlow)
             {
-                if ((pc_t) result == runtime->continuationFrames [runtime->numContinuationFrames - 1].pc + 1)
+                if ((pc_t) result == runtime->continuationFrames [runtime->numContinuationFrames - 1].pc + d_m3LoopOpLines)
                 {
                     continuesLoop = true;
                     break;
@@ -1646,211 +1640,448 @@ M3BacktraceInfo *  m3_GetBacktrace  (IM3Runtime i_runtime)
 
 #if d_m3HasSnapshot
 
-// Snapshot v1 is a process-local, same-binary/same-module continuation format.
-// It avoids serializing raw stack, memory, function, and code pointers: continuation PCs
-// are encoded as function identities plus offsets; SP is a stack-slot offset; memory
-// is encoded as memory index 0. Continuation PC restoration depends on deterministic
-// same-binary recompilation, so this is not a reboot-safe persistent format.
-#define M3_SNAPSHOT_MAGIC   0x3153504du /* MPS1 */
-#define M3_SNAPSHOT_VERSION 1u
-#define M3_SNAPSHOT_FLAGS_FLOAT (d_m3HasFloat ? 1u : 0u)
-
-typedef struct M3SnapshotHeader
-{
-    u32 magic, version, headerSize, flags;
-    u32 totalSize;
-    u32 stackSize, numStackSlots;
-    u64 fuel;
-    u32 fuelEnabled, suspended;
-    u32 frameCount, stackBytes, memoryPages, memoryPageSize, memoryBytes;
-    u32 moduleCount, globalCount, suspendedModuleIndex, suspendedFunctionIndex;
-} M3SnapshotHeader;
+// Snapshot format 2: the state of a task suspended at a safe point, written
+// little-endian and free of host addresses. Positions are wasm offsets, which
+// any build that lays out the interpreter stack the same way (the compiler
+// version and slot width checked below) compiles to the same place, whatever
+// its pointer size, code page size or compile order.
+//
+//   header    magic "M3S2", compiler, flags, module hash, memory pages,
+//             memory page size, memory bytes, stack slots, frames, globals,
+//             suspended function
+//   frames    kind, function, wasm offset, stack slot, r0, fp0 (outer first)
+//   stack     the used part of the interpreter stack, slot by slot
+//   memory    runs of (zero bytes, data bytes, data) covering linear memory
+//   globals   type, value
+#define M3_SNAPSHOT_MAGIC       0x3253334du     /* "M3S2" */
+// Bump when the compiler lays out the interpreter stack differently.
+#define M3_SNAPSHOT_COMPILER    1u
+#define M3_SNAPSHOT_FLAGS       ((d_m3Use32BitSlots ? 1u : 0u) | (d_m3HasFloat ? 2u : 0u))
+#define M3_SNAPSHOT_MAX_FRAMES  4096u
+// Zero runs shorter than this are written as data.
+#define M3_SNAPSHOT_MIN_ZERO_RUN 64u
 
 typedef struct M3SnapshotFrame
 {
-    u32 moduleIndex, functionIndex, pcOffset, spSlotOffset, memoryIndex, allowInternalControlFlow;
-    u64 r0;
-#if d_m3HasFloat
-    f64 fp0;
-#endif
+    u32 kind, functionIndex, wasmOffset, spSlot;
+    u64 r0, fp0;
 } M3SnapshotFrame;
 
-typedef struct M3SnapshotGlobal
+typedef struct M3SnapshotStream
 {
-    u32 moduleIndex, globalIndex, type;
-    u64 value;
-} M3SnapshotGlobal;
+    M3SnapshotWrite write;
+    M3SnapshotRead  read;
+    void *          context;
+} M3SnapshotStream;
 
-static u32 SnapshotCountModules (IM3Runtime runtime)
+static M3Result SnapshotPut (M3SnapshotStream * s, const void * data, u32 size)
 {
-    u32 n = 0; for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next) n++; return n;
+    return size ? s->write (s->context, data, size) : m3Err_none;
 }
 
-static IM3Module SnapshotGetModule (IM3Runtime runtime, u32 index)
+static M3Result SnapshotPut32 (M3SnapshotStream * s, u32 value)
 {
-    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, index--)
+    u8 b [4] = { (u8) value, (u8) (value >> 8), (u8) (value >> 16), (u8) (value >> 24) };
+    return SnapshotPut (s, b, 4);
+}
+
+static M3Result SnapshotPut64 (M3SnapshotStream * s, u64 value)
+{
+    M3Result r = SnapshotPut32 (s, (u32) value);
+    return r ? r : SnapshotPut32 (s, (u32) (value >> 32));
+}
+
+static M3Result SnapshotGet (M3SnapshotStream * s, void * data, u32 size)
+{
+    return size ? s->read (s->context, data, size) : m3Err_none;
+}
+
+static M3Result SnapshotGet32 (M3SnapshotStream * s, u32 * value)
+{
+    u8 b [4];
+    M3Result r = SnapshotGet (s, b, 4);
+    *value = (u32) b[0] | ((u32) b[1] << 8) | ((u32) b[2] << 16) | ((u32) b[3] << 24);
+    return r;
+}
+
+static M3Result SnapshotGet64 (M3SnapshotStream * s, u64 * value)
+{
+    u32 lo = 0, hi = 0;
+    M3Result r = SnapshotGet32 (s, & lo);
+    if (not r) r = SnapshotGet32 (s, & hi);
+    *value = (u64) lo | ((u64) hi << 32);
+    return r;
+}
+
+static u32 SnapshotMemoryBytes (IM3Runtime runtime)
+{
+    return runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0;
+}
+
+// The function whose body holds a wasm offset.
+static IM3Function SnapshotFunctionAt (IM3Module module, u32 wasmOffset)
+{
+    for (u32 i = module->numFuncImports; i < module->numFunctions; ++i)
     {
-        if (index == 0)
-            return m;
+        IM3Function f = & module->functions [i];
+        if (wasmOffset >= f->wasmOffset and wasmOffset < f->wasmEndOffset)
+            return f;
     }
     return NULL;
 }
 
-static bool SnapshotFunctionIndex (IM3Function f, u32 * moduleIndex, u32 * functionIndex)
+// Name a continuation frame by its safe point.
+static M3Result SnapshotDescribeFrame (IM3Runtime runtime, M3ContinuationFrame * frame, M3SnapshotFrame * out)
 {
-    if (not f or not f->module or not f->module->runtime) return false;
-    u32 mi = 0; for (IM3Module m = f->module->runtime->modules; m; m = m->next, mi++)
-        if (m == f->module) { *moduleIndex = mi; *functionIndex = (u32)(f - m->functions); return *functionIndex < m->numFunctions; }
-    return false;
+    IM3Module module = runtime->modules;
+    IM3Function function = NULL;
+
+    M3_INIT (* out);
+    if (frame->allowInternalControlFlow)
+    {
+        out->kind = c_m3SafePointLoop;
+        out->wasmOffset = * (u32 *) (frame->pc + 1);
+    }
+    else if (IsEntryOperation (frame->pc))
+    {
+        out->kind = c_m3SafePointEntry;
+        function = * (IM3Function *) (frame->pc + 1);
+    }
+    else
+    {
+        out->kind = c_m3SafePointReturn;
+        out->wasmOffset = * (u32 *) (frame->pc - 1);
+    }
+
+    if (out->kind != c_m3SafePointEntry)
+        function = SnapshotFunctionAt (module, out->wasmOffset);
+    if (not function or function->module != module)
+        return m3Err_snapshotUnsupported;
+
+    out->functionIndex = (u32) (function - module->functions);
+    out->spSlot = (u32) ((m3slot_t *) frame->sp - (m3slot_t *) runtime->stack);
+    out->r0 = (u64) frame->r0;
+# if d_m3HasFloat
+    memcpy (& out->fp0, & frame->fp0, sizeof (out->fp0));
+# endif
+    if (out->spSlot > runtime->numStackSlots)
+        return m3Err_snapshotUnsupported;
+    return m3Err_none;
 }
 
-static u32 SnapshotCountGlobals (IM3Runtime runtime)
+static M3Result SnapshotWrite (IM3Runtime runtime, M3SnapshotStream * s)
 {
-    u32 n = 0; for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next) n += m->numGlobals; return n;
-}
+    M3Result result = m3Err_none;
+    IM3Module module = runtime ? runtime->modules : NULL;
 
+    if (not runtime or not module or module->next)
+        return m3Err_snapshotUnsupported;
+    if (not runtime->suspended or not runtime->suspendedFunction or runtime->numContinuationFrames == 0)
+        return m3Err_snapshotUnsupported;
+    if (runtime->suspendedFunction->module != module)
+        return m3Err_snapshotUnsupported;
 
-static bool SnapshotFindFunctionPC (IM3Runtime runtime, pc_t pc, u32 * moduleIndex, u32 * functionIndex, u32 * offset)
-{
-    u32 bestMi = 0, bestFi = 0; pc_t best = NULL;
-    u32 mi = 0;
-    for (IM3Module m = runtime ? runtime->modules : NULL; m; m = m->next, mi++)
-        for (u32 fi = 0; fi < m->numFunctions; fi++) {
-            pc_t c = m->functions[fi].compiled;
-            if (c && c <= pc && (!best || c > best)) { best = c; bestMi = mi; bestFi = fi; }
+    // The stack is live up to the deepest frame's slots.
+    u32 stackSlots = 0;
+    for (u32 i = 0; i < runtime->numContinuationFrames; ++i)
+    {
+        M3SnapshotFrame f;
+        result = SnapshotDescribeFrame (runtime, & runtime->continuationFrames [i], & f);
+        if (result) return result;
+        u32 top = f.spSlot + module->functions [f.functionIndex].maxStackSlots;
+        if (top > stackSlots) stackSlots = top;
+    }
+    if (stackSlots > runtime->numStackSlots)
+        stackSlots = runtime->numStackSlots;
+
+    u32 memoryBytes = SnapshotMemoryBytes (runtime);
+    u32 header [] = {
+        M3_SNAPSHOT_MAGIC, M3_SNAPSHOT_COMPILER, M3_SNAPSHOT_FLAGS, module->wasmHash,
+        runtime->memory.numPages, runtime->memory.pageSize, memoryBytes,
+        stackSlots, runtime->numContinuationFrames, module->numGlobals,
+        (u32) (runtime->suspendedFunction - module->functions)
+    };
+    for (u32 i = 0; i < sizeof (header) / sizeof (header [0]) and not result; ++i)
+        result = SnapshotPut32 (s, header [i]);
+
+    for (u32 i = 0; i < runtime->numContinuationFrames and not result; ++i)
+    {
+        M3SnapshotFrame f;
+        result = SnapshotDescribeFrame (runtime, & runtime->continuationFrames [i], & f);
+        if (not result) result = SnapshotPut32 (s, f.kind);
+        if (not result) result = SnapshotPut32 (s, f.functionIndex);
+        if (not result) result = SnapshotPut32 (s, f.wasmOffset);
+        if (not result) result = SnapshotPut32 (s, f.spSlot);
+        if (not result) result = SnapshotPut64 (s, f.r0);
+        if (not result) result = SnapshotPut64 (s, f.fp0);
+    }
+
+    // Slots and memory are little-endian on every supported target.
+    if (not result)
+        result = SnapshotPut (s, runtime->stack, stackSlots * (u32) sizeof (m3slot_t));
+
+    const u8 * memory = memoryBytes ? m3MemData (runtime->memory.mallocated) : NULL;
+    for (u32 at = 0; at < memoryBytes and not result; )
+    {
+        u32 zeros = 0;
+        while (at + zeros < memoryBytes and memory [at + zeros] == 0) ++zeros;
+        if (zeros < M3_SNAPSHOT_MIN_ZERO_RUN and at + zeros < memoryBytes)
+            zeros = 0;
+        u32 data = 0;
+        for (u32 run = 0; at + zeros + data < memoryBytes; )
+        {
+            run = memory [at + zeros + data] ? 0 : run + 1;
+            ++data;
+            if (run == M3_SNAPSHOT_MIN_ZERO_RUN) { data -= run; break; }
         }
-    if (!best) return false;
-    *moduleIndex = bestMi; *functionIndex = bestFi; *offset = (u32)(pc - best); return true;
+        result = SnapshotPut32 (s, zeros);
+        if (not result) result = SnapshotPut32 (s, data);
+        if (not result) result = SnapshotPut (s, memory + at + zeros, data);
+        at += zeros + data;
+    }
+
+    for (u32 i = 0; i < module->numGlobals and not result; ++i)
+    {
+        M3Global * g = & module->globals [i];
+        result = SnapshotPut32 (s, g->type);
+# if d_m3HasDylink
+        if (not result) result = SnapshotPut64 (s, * (u64 *) m3d_GlobalValuePointer (g));
+# else
+        if (not result) result = SnapshotPut64 (s, (u64) g->i64Value);
+# endif
+    }
+    return result;
 }
 
-static pc_t SnapshotGetFunctionPC (IM3Runtime runtime, u32 moduleIndex, u32 functionIndex, u32 offset)
+// Compile a function so that the queries naming it learn their pcs.
+static M3Result SnapshotCompileFor (IM3Runtime runtime, IM3Function function, M3SafePointQuery * queries, u32 count)
 {
-    IM3Module m = SnapshotGetModule(runtime, moduleIndex);
-    if (!m || functionIndex >= m->numFunctions || !m->functions[functionIndex].compiled) return NULL;
-    return m->functions[functionIndex].compiled + offset;
+    // Code already compiled stays valid for whoever calls into it; the new
+    // copy only adds the positions this load needs. Metacode loaded from a
+    // cache without its source cannot be compiled again.
+    if (not function->wasm)
+        return m3Err_snapshotUnsupported;
+    function->compiled = NULL;
+    runtime->safePointQueries = queries;
+    runtime->numSafePointQueries = count;
+    M3Result result = CompileFunction (function);
+    runtime->safePointQueries = NULL;
+    runtime->numSafePointQueries = 0;
+    return result;
 }
 
-static bool SnapshotPCInCodeRange (IM3Runtime runtime, pc_t pc)
+static M3Result SnapshotRead (IM3Runtime runtime, M3SnapshotStream * s)
 {
-    IM3CodePage lists[2] = { runtime->pagesOpen, runtime->pagesFull };
-    for (u32 l = 0; l < 2; l++)
-        for (IM3CodePage p = lists[l]; p; p = p->info.next) {
-            pc_t start = GetPageStartPC (p);
-            pc_t end = GetPagePC (p);
-            if (pc >= start && pc < end) return true;
+    M3Result result = m3Err_none;
+    IM3Module module = runtime ? runtime->modules : NULL;
+    M3SnapshotFrame * frames = NULL;
+    M3SafePointQuery * queries = NULL;
+
+    if (not runtime or not module or module->next)
+        return m3Err_snapshotUnsupported;
+
+    u32 header [11];
+    for (u32 i = 0; i < 11 and not result; ++i)
+        result = SnapshotGet32 (s, & header [i]);
+    if (result) return result;
+
+    u32 memoryPages = header [4], pageSize = header [5], memoryBytes = header [6];
+    u32 stackSlots = header [7], frameCount = header [8], globalCount = header [9], suspendedIndex = header [10];
+    if (header [0] != M3_SNAPSHOT_MAGIC or header [1] != M3_SNAPSHOT_COMPILER or header [2] != M3_SNAPSHOT_FLAGS)
+        return m3Err_snapshotInvalid;
+    if (header [3] != module->wasmHash or pageSize != runtime->memory.pageSize)
+        return m3Err_snapshotInvalid;
+    if (frameCount == 0 or frameCount > M3_SNAPSHOT_MAX_FRAMES or stackSlots > runtime->numStackSlots)
+        return m3Err_snapshotInvalid;
+    if (globalCount != module->numGlobals or suspendedIndex >= module->numFunctions)
+        return m3Err_snapshotInvalid;
+
+    frames = m3_AllocArray (M3SnapshotFrame, frameCount);
+    queries = m3_AllocArray (M3SafePointQuery, frameCount);
+    if (not frames or not queries)
+        _throw (m3Err_mallocFailed);
+
+    u32 numQueries = 0;
+    for (u32 i = 0; i < frameCount; ++i)
+    {
+        M3SnapshotFrame * f = & frames [i];
+_       (SnapshotGet32 (s, & f->kind));
+_       (SnapshotGet32 (s, & f->functionIndex));
+_       (SnapshotGet32 (s, & f->wasmOffset));
+_       (SnapshotGet32 (s, & f->spSlot));
+_       (SnapshotGet64 (s, & f->r0));
+_       (SnapshotGet64 (s, & f->fp0));
+        if (f->functionIndex < module->numFuncImports or f->functionIndex >= module->numFunctions or f->spSlot > runtime->numStackSlots)
+            _throw (m3Err_snapshotInvalid);
+        IM3Function function = & module->functions [f->functionIndex];
+        if (f->kind == c_m3SafePointReturn or f->kind == c_m3SafePointLoop)
+        {
+            if (SnapshotFunctionAt (module, f->wasmOffset) != function)
+                _throw (m3Err_snapshotInvalid);
+            M3SafePointQuery * q = & queries [numQueries++];
+            q->function = function; q->wasmOffset = f->wasmOffset; q->kind = (u8) f->kind; q->pc = NULL;
         }
-    return false;
+        else if (f->kind != c_m3SafePointEntry)
+            _throw (m3Err_snapshotInvalid);
+    }
+
+    // Find where this build put each safe point: compile every function a
+    // frame is in once, with all the queries.
+    for (u32 i = 0; i < frameCount; ++i)
+    {
+        IM3Function function = & module->functions [frames [i].functionIndex];
+        bool seen = false;
+        for (u32 j = 0; j < i; ++j)
+            seen = seen or frames [j].functionIndex == frames [i].functionIndex;
+        if (seen)
+            continue;
+        bool queried = false;
+        for (u32 q = 0; q < numQueries; ++q)
+            queried = queried or queries [q].function == function;
+        if (queried)
+_           (SnapshotCompileFor (runtime, function, queries, numQueries))
+        else if (not function->compiled)
+_           (CompileFunction (function));
+    }
+    for (u32 q = 0; q < numQueries; ++q)
+        if (not queries [q].pc)
+            _throw (m3Err_snapshotInvalid);
+
+    if (memoryPages != runtime->memory.numPages)
+_       (ResizeMemory (runtime, memoryPages));
+    if (SnapshotMemoryBytes (runtime) != memoryBytes)
+        _throw (m3Err_snapshotInvalid);
+
+_   (SnapshotGet (s, runtime->stack, stackSlots * (u32) sizeof (m3slot_t)));
+
+    u8 * memory = memoryBytes ? m3MemData (runtime->memory.mallocated) : NULL;
+    for (u32 at = 0; at < memoryBytes; )
+    {
+        u32 zeros = 0, data = 0;
+_       (SnapshotGet32 (s, & zeros));
+_       (SnapshotGet32 (s, & data));
+        if (zeros > memoryBytes - at or data > memoryBytes - at - zeros or zeros + data == 0)
+            _throw (m3Err_snapshotInvalid);
+        memset (memory + at, 0, zeros);
+_       (SnapshotGet (s, memory + at + zeros, data));
+        at += zeros + data;
+    }
+
+    for (u32 i = 0; i < globalCount; ++i)
+    {
+        u32 type = 0; u64 value = 0;
+_       (SnapshotGet32 (s, & type));
+_       (SnapshotGet64 (s, & value));
+        M3Global * g = & module->globals [i];
+        if (g->type != type)
+            _throw (m3Err_snapshotInvalid);
+# if d_m3HasDylink
+        * (u64 *) m3d_GlobalValuePointer (g) = value;
+# else
+        g->i64Value = (i64) value;
+# endif
+    }
+
+    if (frameCount > runtime->maxContinuationFrames)
+    {
+        M3ContinuationFrame * grown = m3_ReallocArray (M3ContinuationFrame, runtime->continuationFrames, frameCount, runtime->maxContinuationFrames);
+        if (not grown)
+            _throw (m3Err_mallocFailed);
+        runtime->continuationFrames = grown;
+        runtime->maxContinuationFrames = frameCount;
+    }
+    for (u32 i = 0, q = 0; i < frameCount; ++i)
+    {
+        M3SnapshotFrame * f = & frames [i];
+        M3ContinuationFrame * frame = & runtime->continuationFrames [i];
+        M3_INIT (* frame);
+        frame->pc = (f->kind == c_m3SafePointEntry) ? module->functions [f->functionIndex].compiled : queries [q++].pc;
+        frame->sp = (m3stack_t) ((m3slot_t *) runtime->stack + f->spSlot);
+        frame->mem = runtime->memory.mallocated;
+        frame->r0 = (m3reg_t) f->r0;
+        frame->allowInternalControlFlow = (f->kind == c_m3SafePointLoop);
+# if d_m3HasFloat
+        memcpy (& frame->fp0, & f->fp0, sizeof (frame->fp0));
+# endif
+    }
+
+    runtime->numContinuationFrames = frameCount;
+    runtime->suspended = true;
+    runtime->fuelEnabled = true;
+    runtime->suspendedFunction = & module->functions [suspendedIndex];
+    runtime->lastCalled = NULL;
+
+    _catch:
+    m3_Free (frames);
+    m3_Free (queries);
+    return result;
 }
 
-static u32 SnapshotSize (IM3Runtime runtime)
+M3Result m3_WriteRuntimeSnapshot (IM3Runtime runtime, M3SnapshotWrite write, void * context)
 {
-    u32 memoryBytes = runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0;
-    return (u32)(sizeof (M3SnapshotHeader) +
-                 runtime->numContinuationFrames * sizeof (M3SnapshotFrame) +
-                 runtime->stackSize + memoryBytes +
-                 SnapshotCountGlobals (runtime) * sizeof (M3SnapshotGlobal));
+    if (not write) return m3Err_snapshotInvalid;
+    M3SnapshotStream s = { write, NULL, context };
+    return SnapshotWrite (runtime, & s);
+}
+
+M3Result m3_ReadRuntimeSnapshot (IM3Runtime runtime, M3SnapshotRead read, void * context)
+{
+    if (not read) return m3Err_snapshotInvalid;
+    M3SnapshotStream s = { NULL, read, context };
+    return SnapshotRead (runtime, & s);
+}
+
+typedef struct M3SnapshotBuffer
+{
+    u8 *        data;
+    u32         size;
+    u32         used;
+} M3SnapshotBuffer;
+
+static M3Result SnapshotBufferWrite (void * context, const void * data, uint32_t size)
+{
+    M3SnapshotBuffer * b = (M3SnapshotBuffer *) context;
+    if (b->data and size <= b->size - b->used and b->used <= b->size)
+        memcpy (b->data + b->used, data, size);
+    b->used += size;
+    return m3Err_none;
+}
+
+static M3Result SnapshotBufferRead (void * context, void * data, uint32_t size)
+{
+    M3SnapshotBuffer * b = (M3SnapshotBuffer *) context;
+    if (size > b->size - b->used) return m3Err_snapshotInvalid;
+    memcpy (data, b->data + b->used, size);
+    b->used += size;
+    return m3Err_none;
 }
 
 M3Result m3_GetRuntimeSnapshotSize (IM3Runtime runtime, uint32_t * out_size)
 {
-    if (not runtime or not out_size) return m3Err_snapshotInvalid;
-    if (not runtime->suspended) return m3Err_snapshotUnsupported;
-    *out_size = SnapshotSize (runtime);
-    return m3Err_none;
+    if (not out_size) return m3Err_snapshotInvalid;
+    M3SnapshotBuffer b = { NULL, 0, 0 };
+    M3Result result = m3_WriteRuntimeSnapshot (runtime, SnapshotBufferWrite, & b);
+    *out_size = b.used;
+    return result;
 }
 
 M3Result m3_SaveRuntimeSnapshot (IM3Runtime runtime, uint8_t * buffer, uint32_t buffer_size, uint32_t * out_size)
 {
-    if (not runtime or not out_size) return m3Err_snapshotInvalid;
-    if (not runtime->suspended or not runtime->suspendedFunction) return m3Err_snapshotUnsupported;
-    u32 need = SnapshotSize (runtime); *out_size = need;
-    if (not buffer or buffer_size < need) return m3Err_snapshotBufferTooSmall;
-
-    u32 smi = 0, sfi = 0;
-    if (not SnapshotFunctionIndex (runtime->suspendedFunction, &smi, &sfi)) return m3Err_snapshotUnsupported;
-
-    M3SnapshotHeader h; M3_INIT (h);
-    h.magic = M3_SNAPSHOT_MAGIC; h.version = M3_SNAPSHOT_VERSION; h.headerSize = sizeof h; h.flags = M3_SNAPSHOT_FLAGS_FLOAT; h.totalSize = need;
-    h.stackSize = runtime->stackSize; h.numStackSlots = runtime->numStackSlots; h.fuel = runtime->fuel;
-    h.fuelEnabled = runtime->fuelEnabled; h.suspended = runtime->suspended; h.frameCount = runtime->numContinuationFrames;
-    h.stackBytes = runtime->stackSize; h.memoryPages = runtime->memory.numPages; h.memoryPageSize = runtime->memory.pageSize;
-    h.memoryBytes = runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0;
-    h.moduleCount = SnapshotCountModules (runtime); h.globalCount = SnapshotCountGlobals (runtime);
-    h.suspendedModuleIndex = smi; h.suspendedFunctionIndex = sfi;
-
-    u8 * p = buffer; memcpy (p, &h, sizeof h); p += sizeof h;
-    for (u32 i = 0; i < runtime->numContinuationFrames; i++) {
-        M3ContinuationFrame * f = &runtime->continuationFrames[i]; M3SnapshotFrame sf; M3_INIT (sf);
-        if (not SnapshotFindFunctionPC (runtime, f->pc, &sf.moduleIndex, &sf.functionIndex, &sf.pcOffset)) return m3Err_snapshotUnsupported;
-        sf.spSlotOffset = (u32)(f->sp - (m3stack_t) runtime->stack); if (sf.spSlotOffset > runtime->numStackSlots) return m3Err_snapshotUnsupported;
-        sf.memoryIndex = f->mem ? 0 : UINT32_MAX; sf.r0 = (u64) f->r0; sf.allowInternalControlFlow = f->allowInternalControlFlow;
-#if d_m3HasFloat
-        sf.fp0 = f->fp0;
-#endif
-        memcpy (p, &sf, sizeof sf); p += sizeof sf;
-    }
-    memcpy (p, runtime->stack, runtime->stackSize); p += runtime->stackSize;
-    if (h.memoryBytes) { memcpy (p, m3MemData (runtime->memory.mallocated), h.memoryBytes); p += h.memoryBytes; }
-    u32 mi = 0; for (IM3Module m = runtime->modules; m; m = m->next, mi++) for (u32 gi = 0; gi < m->numGlobals; gi++) {
-        M3Global * g = &m->globals[gi]; M3SnapshotGlobal sg; sg.moduleIndex = mi; sg.globalIndex = gi; sg.type = g->type;
-#if d_m3HasDylink
-        sg.value = *(u64 *) m3d_GlobalValuePointer (g);
-#else
-        sg.value = g->i64Value;
-#endif
-        memcpy (p, &sg, sizeof sg); p += sizeof sg;
-    }
-    return m3Err_none;
+    if (not out_size) return m3Err_snapshotInvalid;
+    M3SnapshotBuffer b = { NULL, 0, 0 };
+    M3Result result = m3_WriteRuntimeSnapshot (runtime, SnapshotBufferWrite, & b);
+    *out_size = b.used;
+    if (result) return result;
+    if (not buffer or buffer_size < b.used) return m3Err_snapshotBufferTooSmall;
+    b.data = buffer; b.size = buffer_size; b.used = 0;
+    return m3_WriteRuntimeSnapshot (runtime, SnapshotBufferWrite, & b);
 }
 
 M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uint32_t buffer_size)
 {
-    if (not runtime or not buffer or buffer_size < sizeof (M3SnapshotHeader)) return m3Err_snapshotInvalid;
-    const u8 * p = buffer; M3SnapshotHeader h; memcpy (&h, p, sizeof h); p += sizeof h;
-    if (h.magic != M3_SNAPSHOT_MAGIC or h.version != M3_SNAPSHOT_VERSION or h.headerSize != sizeof h or h.flags != M3_SNAPSHOT_FLAGS_FLOAT) return m3Err_snapshotInvalid;
-    if (h.stackSize != runtime->stackSize or h.numStackSlots != runtime->numStackSlots) return m3Err_snapshotInvalid;
-    if (h.moduleCount != SnapshotCountModules (runtime) or h.globalCount != SnapshotCountGlobals (runtime)) return m3Err_snapshotInvalid;
-    if (h.frameCount == 0 or h.frameCount > 1024) return m3Err_snapshotInvalid;
-    u32 need = (u32)(sizeof h + h.frameCount * sizeof (M3SnapshotFrame) + h.stackBytes + h.memoryBytes + h.globalCount * sizeof (M3SnapshotGlobal));
-    if (h.totalSize != need or buffer_size < h.totalSize or h.stackBytes != runtime->stackSize or h.memoryPageSize != runtime->memory.pageSize) return m3Err_snapshotInvalid;
-    if (ResizeMemory (runtime, h.memoryPages)) return m3Err_snapshotInvalid;
-    if ((runtime->memory.mallocated ? (u32) runtime->memory.mallocated->length : 0) != h.memoryBytes) return m3Err_snapshotInvalid;
-
-    for (IM3Module m = runtime->modules; m; m = m->next) { M3Result r = m3_CompileModule (m); if (r) return r; }
-    IM3Module sm = SnapshotGetModule (runtime, h.suspendedModuleIndex);
-    if (not sm or h.suspendedFunctionIndex >= sm->numFunctions) return m3Err_snapshotInvalid;
-
-    if (h.frameCount > runtime->maxContinuationFrames) {
-        M3ContinuationFrame * frames = m3_ReallocArray (M3ContinuationFrame, runtime->continuationFrames, h.frameCount, runtime->maxContinuationFrames);
-        if (not frames) return m3Err_mallocFailed;
-        runtime->continuationFrames = frames; runtime->maxContinuationFrames = h.frameCount;
-    }
-    for (u32 i = 0; i < h.frameCount; i++) {
-        M3SnapshotFrame sf; memcpy (&sf, p, sizeof sf); p += sizeof sf;
-        pc_t pc = SnapshotGetFunctionPC (runtime, sf.moduleIndex, sf.functionIndex, sf.pcOffset); if (not pc or not SnapshotPCInCodeRange (runtime, pc)) return m3Err_snapshotInvalid;
-        if (sf.spSlotOffset > runtime->numStackSlots) return m3Err_snapshotInvalid;
-        runtime->continuationFrames[i].pc = pc; runtime->continuationFrames[i].sp = (m3stack_t) runtime->stack + sf.spSlotOffset;
-        runtime->continuationFrames[i].mem = (sf.memoryIndex == 0) ? runtime->memory.mallocated : NULL;
-        if (sf.memoryIndex != 0 && sf.memoryIndex != UINT32_MAX) return m3Err_snapshotInvalid;
-        runtime->continuationFrames[i].r0 = (m3reg_t) sf.r0; runtime->continuationFrames[i].allowInternalControlFlow = sf.allowInternalControlFlow;
-#if d_m3HasFloat
-        runtime->continuationFrames[i].fp0 = sf.fp0;
-#endif
-    }
-    memcpy (runtime->stack, p, runtime->stackSize); p += runtime->stackSize;
-    if (h.memoryBytes) { memcpy (m3MemData (runtime->memory.mallocated), p, h.memoryBytes); p += h.memoryBytes; }
-    for (u32 i = 0; i < h.globalCount; i++) {
-        M3SnapshotGlobal sg; memcpy (&sg, p, sizeof sg); p += sizeof sg; IM3Module m = SnapshotGetModule (runtime, sg.moduleIndex);
-        if (not m or sg.globalIndex >= m->numGlobals or m->globals[sg.globalIndex].type != sg.type) return m3Err_snapshotInvalid;
-#if d_m3HasDylink
-        *(u64 *) m3d_GlobalValuePointer (&m->globals[sg.globalIndex]) = sg.value;
-#else
-        m->globals[sg.globalIndex].i64Value = sg.value;
-#endif
-    }
-    runtime->fuel = h.fuel; runtime->fuelEnabled = h.fuelEnabled; runtime->suspended = true;
-    runtime->numContinuationFrames = h.frameCount; runtime->suspendedFunction = &sm->functions[h.suspendedFunctionIndex]; runtime->lastCalled = NULL;
-    return m3Err_none;
+    if (not buffer) return m3Err_snapshotInvalid;
+    M3SnapshotBuffer b = { (u8 *) buffer, buffer_size, 0 };
+    return m3_ReadRuntimeSnapshot (runtime, SnapshotBufferRead, & b);
 }
 
 #else
@@ -1876,6 +2107,22 @@ M3Result m3_LoadRuntimeSnapshot (IM3Runtime runtime, const uint8_t * buffer, uin
     (void) runtime;
     (void) buffer;
     (void) buffer_size;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_WriteRuntimeSnapshot (IM3Runtime runtime, M3SnapshotWrite write, void * context)
+{
+    (void) runtime;
+    (void) write;
+    (void) context;
+    return m3Err_snapshotUnsupported;
+}
+
+M3Result m3_ReadRuntimeSnapshot (IM3Runtime runtime, M3SnapshotRead read, void * context)
+{
+    (void) runtime;
+    (void) read;
+    (void) context;
     return m3Err_snapshotUnsupported;
 }
 

@@ -105,6 +105,34 @@ void  EmitConstant32  (IM3Compilation o, const u32 i_immediate)
         EmitWord32 (o->page, i_immediate);
 }
 
+#if d_m3HasSnapshot
+// A task stops only at safe points: a function entry, the start of a loop
+// iteration, or the return from a call. Calls and loops carry the wasm offset
+// of their instruction, so a snapshot names them the same way in every build.
+static M3_NOINLINE
+void  EmitSafePoint  (IM3Compilation o, u8 i_kind)
+{
+    u32 offset = (u32) (o->lastOpcodeStart - o->module->wasmStart);
+
+    EmitConstant32 (o, offset);
+
+    if (o->page)
+    {
+        // A loop's safe point is its op_Loop, just before the offset.
+        pc_t pc = (i_kind == c_m3SafePointLoop) ? GetPC (o) - 2 : GetPC (o);
+        for (u32 i = 0; i < o->runtime->numSafePointQueries; ++i)
+        {
+            M3SafePointQuery * q = & o->runtime->safePointQueries [i];
+            if (q->function == o->function and q->kind == i_kind and q->wasmOffset == offset)
+                q->pc = pc;
+        }
+    }
+}
+#   define EmitSafePointFor(o, KIND)   EmitSafePoint (o, KIND)
+#else
+#   define EmitSafePointFor(o, KIND)
+#endif
+
 static M3_NOINLINE
 void  EmitSlotOffset  (IM3Compilation o, const i32 i_offset)
 {
@@ -1727,6 +1755,7 @@ _           (CompileCallArgsAndReturn (o, & slotTop, function->funcType, false))
 _           (EmitOp (o, op_CallLinked));
             EmitPointer (o, function);
             EmitSlotOffset (o, slotTop);
+            EmitSafePointFor (o, c_m3SafePointReturn);
         }
         else
 #endif
@@ -1752,6 +1781,7 @@ _           (CompileCallArgsAndReturn (o, & slotTop, function->funcType, false))
 _           (EmitOp     (o, op));
             EmitPointer (o, operand);
             EmitSlotOffset  (o, slotTop);
+            EmitSafePointFor (o, c_m3SafePointReturn);
         }
         else
         {
@@ -1789,6 +1819,7 @@ _   (EmitOp         (o, op_CallIndirect));
     EmitPointer     (o, o->module);
     EmitPointer     (o, type);              // TODO: unify all types in M3Environment
     EmitSlotOffset  (o, execTop);
+    EmitSafePointFor (o, c_m3SafePointReturn);
 
 } _catch:
     return result;
@@ -1951,6 +1982,7 @@ _                       (CopyStackIndexToSlot (o, newSlot, i));
         }
 
 _       (EmitOp (o, op_Loop));
+        EmitSafePointFor (o, c_m3SafePointLoop);
     }
     else
     {
@@ -3072,10 +3104,18 @@ M3Result  ReserveConstants  (IM3Compilation o)
 }
 
 
+#if d_m3HasSnapshot
+bool  IsEntryOperation  (pc_t i_pc)
+{
+    return * i_pc == (code_t) op_Entry;
+}
+#endif
+
 M3Result  CompileFunction  (IM3Function io_function)
 {
 #if d_m3HasM3C
-    if (m3c_HasFunction (io_function))
+    // A snapshot load needs the compiler to report where safe points land.
+    if (m3c_HasFunction (io_function) and not io_function->module->runtime->numSafePointQueries)
         return m3c_LoadFunction (io_function);
 #endif
 

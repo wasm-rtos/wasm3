@@ -422,6 +422,10 @@ _                   (NormalizeType (& normalType, wasmType));
                 func->module = io_module;
                 func->wasm = start;
                 func->wasmEnd = i_bytes;
+#if d_m3HasSnapshot
+                func->wasmOffset = (u32) (start - io_module->wasmStart);
+                func->wasmEndOffset = (u32) (i_bytes - io_module->wasmStart);
+#endif
                 //func->ownsWasmCode = io_module->hasWasmCodeCopy;
 //                func->numLocals = numLocals;
             }
@@ -683,6 +687,12 @@ _try {
 
     module->wasmStart = pos;
     module->wasmEnd = end;
+#if d_m3HasSnapshot
+    // FNV-1a: snapshots load only into the program they were taken from.
+    module->wasmHash = 2166136261u;
+    for (const u8 * p = pos; p < end; ++p)
+        module->wasmHash = (module->wasmHash ^ *p) * 16777619u;
+#endif
 
     u32 magic, version;
 _   (Read_u32 (& magic, & pos, end));
