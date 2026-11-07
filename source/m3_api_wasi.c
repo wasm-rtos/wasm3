@@ -45,6 +45,14 @@
 #      include <sys/random.h>
 #  endif
 #  define HAS_IOVEC
+#elif defined(ESP_PLATFORM)
+// ESP-IDF: newlib with POSIX file calls through its VFS, no CPU-time clocks
+#  include <unistd.h>
+#  if __has_include(<esp_random.h>)
+#      include <esp_random.h>
+#  else
+#      include <esp_system.h>
+#  endif
 #elif defined(_WIN32)
 #  include <Windows.h>
 #  include <io.h>
@@ -166,9 +174,13 @@ static inline
 int convert_clockid(__wasi_clockid_t in) {
     switch (in) {
     case __WASI_CLOCKID_MONOTONIC:            return CLOCK_MONOTONIC;
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
     case __WASI_CLOCKID_PROCESS_CPUTIME_ID:   return CLOCK_PROCESS_CPUTIME_ID;
+#endif
     case __WASI_CLOCKID_REALTIME:             return CLOCK_REALTIME;
+#if defined(CLOCK_THREAD_CPUTIME_ID)
     case __WASI_CLOCKID_THREAD_CPUTIME_ID:    return CLOCK_THREAD_CPUTIME_ID;
+#endif
     default: return -1;
     }
 }
@@ -352,7 +364,9 @@ m3ApiRawFunction(m3_wasi_generic_fd_fdstat_get)
 #if !defined(APE)
     m3ApiWriteMem16(&fdstat->fs_flags,
                        ((fl & O_APPEND)    ? __WASI_FDFLAGS_APPEND    : 0) |
+#if defined(O_DSYNC)
                        ((fl & O_DSYNC)     ? __WASI_FDFLAGS_DSYNC     : 0) |
+#endif
                        ((fl & O_NONBLOCK)  ? __WASI_FDFLAGS_NONBLOCK  : 0) |
                        //((fl & O_RSYNC)     ? __WASI_FDFLAGS_RSYNC     : 0) |
                        ((fl & O_SYNC)      ? __WASI_FDFLAGS_SYNC      : 0));
@@ -536,7 +550,9 @@ m3ApiRawFunction(m3_wasi_generic_path_open)
                 ((oflags & __WASI_OFLAGS_EXCL)              ? O_EXCL      : 0) |
                 ((oflags & __WASI_OFLAGS_TRUNC)             ? O_TRUNC     : 0) |
                 ((fs_flags & __WASI_FDFLAGS_APPEND)     ? O_APPEND    : 0) |
+#if defined(O_DSYNC)
                 ((fs_flags & __WASI_FDFLAGS_DSYNC)      ? O_DSYNC     : 0) |
+#endif
                 ((fs_flags & __WASI_FDFLAGS_NONBLOCK)   ? O_NONBLOCK  : 0) |
                 //((fs_flags & __WASI_FDFLAGS_RSYNC)      ? O_RSYNC     : 0) |
                 ((fs_flags & __WASI_FDFLAGS_SYNC)       ? O_SYNC      : 0);
@@ -549,7 +565,12 @@ m3ApiRawFunction(m3_wasi_generic_path_open)
         flags |= O_RDONLY; // no-op because O_RDONLY is 0
     }
     int mode = 0644;
+#if defined(ESP_PLATFORM)
+    // No openat in the ESP-IDF VFS: paths are taken from its root
+    int host_fd = open (host_path, flags, mode);
+#else
     int host_fd = openat (preopen[dirfd].fd, host_path, flags, mode);
+#endif
 
     if (host_fd < 0)
     {
@@ -687,6 +708,9 @@ m3ApiRawFunction(m3_wasi_generic_random_get)
 #   endif
 #elif defined(__FreeBSD__) || defined(__linux__)
         retlen = getrandom(buf, buf_len, 0);
+#elif defined(ESP_PLATFORM)
+        esp_fill_random(buf, buf_len);
+        m3ApiReturn(__WASI_ERRNO_SUCCESS);
 #elif defined(_WIN32)
         if (RtlGenRandom(buf, buf_len) == TRUE) {
             m3ApiReturn(__WASI_ERRNO_SUCCESS);
